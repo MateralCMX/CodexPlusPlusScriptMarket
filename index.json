@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-05-21T15:03:07Z",
+  "updated_at": "2026-05-24T15:13:44Z",
   "scripts": [
     {
       "id": "codex-context-used-meter",
@@ -33,6 +33,23 @@
       "homepage": "https://github.com/Ghibli1024/codex-hide-usage-alert",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/1e8ba79da3efb629153d79eaad678b2a48a801c5/scripts/hide-usage-alert.js",
       "sha256": "031d7767ad5022e0be36a6213942de60b346b527667b174472cca4d3d0742073"
+    },
+    {
+      "id": "codex-token-usage",
+      "name": "Codex Token Usage",
+      "description": "在 Codex 每次回复完成后显示本次 token 输入、输出、缓存命中、上下文用量和耗时。",
+      "version": "0.1.0",
+      "author": "Albert_Luo",
+      "tags": [
+        "codex",
+        "tokens",
+        "usage",
+        "metrics",
+        "cache"
+      ],
+      "homepage": "https://github.com/kokotao/codex-token-usage-script",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-token-usage.js",
+      "sha256": "a163bd62d886cd738adaa3966cfc92465892cea2cc9d4fd1dabecc4cc517fd2a"
     }
   ]
 }
