@@ -3,7 +3,7 @@
 name: Codex Context Ring Restore
 description: Restore the original official context-usage ring near the composer controls as much as possible, and inject a lightweight fallback ring only when the official ring is unavailable.
 version: 0.1.2
-author: jby
+author: win9zhx
 */
 
 (() => {
