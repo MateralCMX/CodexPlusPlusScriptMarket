@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-05-26T00:00:00Z",
+  "updated_at": "2026-05-29T06:51:42Z",
   "scripts": [
     {
       "id": "codex-context-ring-restore",
@@ -84,6 +84,23 @@
       "homepage": "https://github.com/puppnn/codex-plusplus-list-pagebuster",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-list-pagebuster.js",
       "sha256": "7fb991273eda02538a22186d6c5891c4b67aff0d59491f3fde7cb396e2117e77"
+    },
+    {
+      "id": "bennett-ui-improvements",
+      "name": "Bennett UI Improvements",
+      "description": "将 b-nnett 版 Bennett UI Improvements 迁移为 BigPizzaV3 Codex++ renderer-only 用户脚本，保留隐藏升级提示、侧栏按钮网格、设置搜索、项目背景、斜杠菜单样式等 UI 增强。原 UI 实现来自 b-nnett/codex-plusplus-bennett-ui，本条目仅做兼容迁移。",
+      "version": "1.0.3-bigpizza.1",
+      "author": "bennett; BigPizzaV3 userscript migration by Xingz",
+      "tags": [
+        "codex",
+        "ui",
+        "sidebar",
+        "settings",
+        "polish"
+      ],
+      "homepage": "https://github.com/b-nnett/codex-plusplus-bennett-ui",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/bennett-ui-improvements.js",
+      "sha256": "f2e9275dacdb57795d123925c5e8da724f1e419155ca04892cbb77e64dfb55dd"
     }
   ]
 }
