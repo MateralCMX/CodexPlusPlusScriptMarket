@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-05-28T07:57:39Z",
+  "updated_at": "2026-05-29T06:54:11Z",
   "scripts": [
     {
       "id": "codex-context-ring-restore",
@@ -23,7 +23,7 @@
       "id": "codex-context-used-meter",
       "name": "Codex Context Used Meter",
       "description": "在 Codex App 对话界面显示当前会话上下文余量，并支持可选 Provider 余额、消耗动画、悬停历史图、inline/floating 显示和主题切换。",
-      "version": "88",
+      "version": "90",
       "author": "Minghou-Lei",
       "tags": [
         "context",
@@ -33,7 +33,7 @@
       ],
       "homepage": "https://github.com/Minghou-Lei/codex-context-used-meter",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-context-used-meter.js",
-      "sha256": "4b3cd1b53da9185f0824c9485bdb8b0450b671ca1702d2abe0a02ccad2577ed3"
+      "sha256": "5b87fa272fb5d8aff8a3c66e2b2866d99fc1dd9656f8e29adafb4ae236f73c2a"
     },
     {
       "id": "hide-usage-alert",
