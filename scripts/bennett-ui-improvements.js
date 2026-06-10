@@ -21,7 +21,7 @@
   "use strict";
 
   const INSTALL_KEY = "__bennettUiImprovementsBigPizza";
-  const VERSION = "1.0.3-bigpizza.1";
+  const VERSION = "1.0.5-bigpizza.1";
   const previous = window[INSTALL_KEY];
   if (previous && typeof previous.stop === "function") {
     try {
@@ -95,15 +95,15 @@ module.exports = {
       features: new Map(/* id -> { dispose } */),
       defaults: {
         "hide-upgrade-prompts": true,
-        "show-usage-in-sidebar": false,
-        "show-message-metrics-on-hover": true,
+        "show-usage-in-sidebar": true,
+        "show-message-metrics-on-hover": false,
         "square-sidebar": false,
         "settings-search": true,
         "match-sidebar-width": true,
         "sidebar-action-grid": true,
         "sidebar-project-backgrounds": true,
-        "sidebar-chat-multi-select": true,
-        "show-pinned-chat-project-names": true,
+        "sidebar-chat-multi-select": false,
+        "show-pinned-chat-project-names": false,
         "slash-menu-polish": true,
       },
     };
@@ -480,7 +480,7 @@ const FEATURES = {
      * `resetAt` is whatever Codex shows verbatim (typically "HH:MM",
      * or "Wed, HH:MM" for weekly API data).
      */
-    let snapshot = readSnapshot(api);
+    let snapshot = null; // Do not render persisted quota data before this page fetches fresh usage.
     let mounted = null; // HTMLElement currently rendered in the sidebar
     let directUsageAvailable = false;
     let directUsageInFlight = false;
@@ -490,6 +490,11 @@ const FEATURES = {
     let usageBridgeReadyLogged = false;
     let usageBridgeScriptInjected = false;
     let bridgeRequestSeq = 0;
+    let lastMountedMode = null;
+    let accountMode = "unknown"; // "official" | "api" | "unknown"
+    let accountModeInFlight = false;
+    let accountModeLastCheckedAt = 0;
+    let accountModeLogged = false;
 
     const log = (...a) => api.log.info("[usage]", ...a);
     const ASIDE_SELECTOR = [
@@ -516,6 +521,7 @@ const FEATURES = {
 
     const applySnapshot = (partial, source) => {
       if (!partial?.fiveHour && !partial?.weekly) return false;
+      if (accountMode === "api") return false;
       const next = {
         fiveHour: partial.fiveHour || snapshot?.fiveHour || null,
         weekly: partial.weekly || snapshot?.weekly || null,
@@ -696,6 +702,104 @@ const FEATURES = {
       });
     };
 
+    const bridgePostJson = async (path, payload = {}, timeoutMs = 2_500) => {
+      const bridge = window.__codexSessionDeleteBridge;
+      if (typeof bridge !== "function") return null;
+      return await Promise.race([
+        bridge(path, payload),
+        new Promise((resolve) => window.setTimeout(() => resolve(null), timeoutMs)),
+      ]);
+    };
+
+    const activeRelayProfile = (settings) => {
+      if (!settings || typeof settings !== "object") return null;
+      const profiles = Array.isArray(settings.relayProfiles) ? settings.relayProfiles : [];
+      const activeId =
+        typeof settings.activeRelayId === "string" && settings.activeRelayId.trim()
+          ? settings.activeRelayId
+          : "default";
+      return profiles.find((profile) => profile?.id === activeId) || profiles[0] || null;
+    };
+
+    const fieldValue = (object, ...keys) => {
+      if (!object || typeof object !== "object") return undefined;
+      for (const key of keys) {
+        if (Object.prototype.hasOwnProperty.call(object, key)) return object[key];
+      }
+      return undefined;
+    };
+
+    const catalogLooksLikeApiMode = (catalog) => {
+      if (!catalog || typeof catalog !== "object") return false;
+      const provider = String(catalog.model_provider || catalog.provider_name || "").toLowerCase();
+      if (!provider) return false;
+      return !["openai", "chatgpt"].includes(provider);
+    };
+
+    const refreshAccountMode = async (force = false) => {
+      if (accountModeInFlight) return accountMode;
+      const now = Date.now();
+      if (!force && accountModeLastCheckedAt && now - accountModeLastCheckedAt < 10_000) {
+        return accountMode;
+      }
+      accountModeLastCheckedAt = now;
+      accountModeInFlight = true;
+      try {
+        let nextMode = "unknown";
+        let settingsMode = "unknown";
+        const settings = await bridgePostJson("/settings/get", {});
+        const profile = activeRelayProfile(settings);
+        const relayMode = fieldValue(profile, "relayMode", "relay_mode");
+        const officialMixApiKey = !!fieldValue(profile, "officialMixApiKey", "official_mix_api_key");
+        const legacyApiConfigured = !!(
+          String(fieldValue(settings, "relayApiKey", "relay_api_key") || "").trim() ||
+          String(fieldValue(settings, "relayBaseUrl", "relay_base_url") || "").trim()
+        );
+        if (relayMode === "official" && !officialMixApiKey) {
+          nextMode = "official";
+        } else if (relayMode === "pureApi" || relayMode === "pure_api") {
+          nextMode = "api";
+        } else if (relayMode === "mixedApi" || relayMode === "mixed_api" || officialMixApiKey) {
+          nextMode = "api";
+        } else if (!relayMode && legacyApiConfigured) {
+          nextMode = "api";
+        }
+
+        if (nextMode === "unknown") {
+          const catalog = await bridgePostJson("/codex-model-catalog", {});
+          if (catalogLooksLikeApiMode(catalog)) nextMode = "api";
+          else if (catalog?.model_provider === "openai" || catalog?.provider_name === "openai") {
+            nextMode = "official";
+          }
+        }
+        if (nextMode === "unknown") nextMode = settingsMode;
+
+        if (nextMode !== "unknown" && nextMode !== accountMode) {
+          accountMode = nextMode;
+          if (accountMode === "api") {
+            snapshot = {
+              fiveHour: { label: "API", pct: null, resetAt: null, apiMode: true },
+              weekly: null,
+              at: Date.now(),
+              apiMode: true,
+            };
+          } else if (snapshot?.apiMode) {
+            snapshot = null;
+          }
+          ensureMounted(true);
+        }
+        if (!accountModeLogged && accountMode !== "unknown") {
+          accountModeLogged = true;
+          log("account mode", accountMode);
+        }
+        return accountMode;
+      } catch (e) {
+        return accountMode;
+      } finally {
+        accountModeInFlight = false;
+      }
+    };
+
     const remainingPercent = (usedPercent) => {
       const used = Number(usedPercent);
       if (!Number.isFinite(used)) return null;
@@ -835,9 +939,10 @@ const FEATURES = {
     };
 
     const refreshUsageFromApi = async () => {
+      if ((await refreshAccountMode()) !== "official") return false;
       if (directUsageInFlight) return false;
       const now = Date.now();
-      if (directUsageLastAttemptAt && now - directUsageLastAttemptAt < 60_000) {
+      if (directUsageLastAttemptAt && now - directUsageLastAttemptAt < 15_000) {
         return false;
       }
       directUsageLastAttemptAt = now;
@@ -978,62 +1083,157 @@ const FEATURES = {
      *
      * Returns the parent element to mount into, or null if not found.
      */
+    const compactSidebarText = (node) =>
+      (node?.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
+
+    const looksLikeSettingsSidebar = (sidebar) => {
+      if (!(sidebar instanceof HTMLElement)) return false;
+      if (
+        sidebar.matches(".window-fx-sidebar-surface.w-token-sidebar") ||
+        sidebar.closest(".window-fx-sidebar-surface.w-token-sidebar") ||
+        sidebar.querySelector("[data-codexpp-settings-search]")
+      ) {
+        return true;
+      }
+      const text = compactSidebarText(sidebar);
+      const englishSettings =
+        text.includes("general") &&
+        text.includes("appearance") &&
+        (text.includes("account") || text.includes("configuration"));
+      const chineseSettings =
+        text.includes("常规") &&
+        text.includes("外观") &&
+        (
+          text.includes("配置") ||
+          text.includes("个性化") ||
+          text.includes("键盘快捷键") ||
+          text.includes("mcp 服务器") ||
+          text.includes("钩子") ||
+          text.includes("连接") ||
+          text.includes("环境") ||
+          text.includes("工作树") ||
+          text.includes("已归档")
+        );
+      return englishSettings || chineseSettings;
+    };
+
+    const looksLikeMainAppSidebar = (sidebar) => {
+      const text = compactSidebarText(sidebar);
+      const hasNewChat = /\bnew chat\b|\bquick chat\b|新建|新对话/.test(text);
+      const hasSearch = /\bsearch\b|搜索/.test(text);
+      const hasProjectOrHistory =
+        /\bprojects?\b|\bhistory\b|\bchats?\b|项目|历史|会话/.test(text);
+      return (hasNewChat && hasSearch) || (hasSearch && hasProjectOrHistory);
+    };
+
     const findUsageSidebar = () => {
-      const sidebar = document.querySelector(ASIDE_SELECTOR);
-      if (!(sidebar instanceof HTMLElement)) return null;
-      if (!isVisibleElement(sidebar)) return null;
-      const rect = sidebar.getBoundingClientRect();
-      return rect.width >= 180 ? sidebar : null;
+      const candidates = Array.from(document.querySelectorAll(ASIDE_SELECTOR))
+        .filter((node) => node instanceof HTMLElement && isVisibleElement(node))
+        .filter((sidebar) => {
+          const rect = sidebar.getBoundingClientRect();
+          return rect.width >= 180 && !looksLikeSettingsSidebar(sidebar);
+        });
+      return candidates.find(looksLikeMainAppSidebar) || null;
+    };
+
+    const controlText = (node) =>
+      [
+        node.getAttribute?.("aria-label"),
+        node.getAttribute?.("title"),
+        node.textContent,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+
+    const isSettingsOrDeviceButton = (button) => {
+      const text = controlText(button);
+      return (
+        /\bsettings?\b|preferences?|设置|偏好/.test(text) ||
+        /\bmobile\b|\bphone\b|\bdevice\b|手机|移动|设备|连接/.test(text)
+      );
+    };
+
+    const nearestControlRow = (sidebar, button) => {
+      const sidebarRect = sidebar.getBoundingClientRect();
+      let row = button.parentElement;
+      while (row && row !== document.body && row !== sidebar.parentElement) {
+        if (!(row instanceof HTMLElement)) break;
+        const rect = row.getBoundingClientRect();
+        const style = window.getComputedStyle(row);
+        const buttonCount = row.querySelectorAll('button, a, [role="button"]').length;
+        const insideSidebar =
+          rect.left >= sidebarRect.left - 8 &&
+          rect.right <= sidebarRect.right + 8;
+        const looksLikeControlLayer =
+          insideSidebar &&
+          rect.height > 0 &&
+          rect.height <= 88 &&
+          (style.display === "flex" || style.display === "grid" || buttonCount >= 2);
+        if (looksLikeControlLayer) return row;
+        row = row.parentElement;
+      }
+      return button.parentElement instanceof HTMLElement ? button.parentElement : null;
+    };
+
+    const createInlineSlot = (row, anchor) => {
+      const existing = row.querySelector(':scope > [data-codexpp="usage-slot"]');
+      if (existing instanceof HTMLElement) return existing;
+      const slot = document.createElement("div");
+      slot.dataset.codexpp = "usage-slot";
+      slot.dataset.codexppUsageSlot = "controls-inline";
+      slot.className = "flex shrink-0 items-center";
+      if (anchor?.parentElement === row) row.insertBefore(slot, anchor);
+      else row.appendChild(slot);
+      return slot;
     };
 
     const findSidebarSlot = () => {
       const sidebar = findUsageSidebar();
       if (!sidebar) return null;
-      // Look for the (now hidden) upgrade pill via its prev-display marker.
-      const prev = sidebar.querySelector('[data-codexpp-prev-display]');
-      if (prev && prev.parentElement) return prev.parentElement;
-      // Fallback: any visible button literally labelled "Upgrade".
-      const btns = sidebar.querySelectorAll('button, a');
-      for (const b of btns) {
-        const t = (b.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
-        if (t === "upgrade") return b.parentElement;
-      }
-      // Windows Store builds often have no Upgrade/Plus pill at all. Keep
-      // this fallback Windows-only so macOS continues to use the native slot.
-      if (!/\bWin/i.test(navigator.platform || navigator.userAgent || "")) {
-        return null;
-      }
       const existingSlot = sidebar.querySelector('[data-codexpp="usage-slot"]');
       if (existingSlot instanceof HTMLElement) return existingSlot;
-      for (const b of btns) {
-        const t = (b.textContent || "").replace(/\s+/g, " ").trim().toLowerCase();
-        if (t !== "settings") continue;
-        let row = b.parentElement;
-        while (row && row !== document.body) {
-          const cls = String(row.className || "");
-          if (
-            /\bflex\b/.test(cls) &&
-            /\bitems-center\b/.test(cls) &&
-            /\bgap-2\b/.test(cls)
-          ) {
-            break;
-          }
-          row = row.parentElement;
-        }
-        if (!(row instanceof HTMLElement)) continue;
-        const slot = document.createElement("div");
-        slot.dataset.codexpp = "usage-slot";
-        slot.dataset.codexppUsageSlot = "settings-inline-windows";
-        slot.className = "flex shrink-0";
-        row.appendChild(slot);
-        return slot;
+
+      const controls = Array.from(sidebar.querySelectorAll('button, a, [role="button"]'))
+        .filter((button) => button instanceof HTMLElement && isVisibleElement(button));
+      const preferredControls = controls.filter(isSettingsOrDeviceButton);
+      const ordered = (preferredControls.length ? preferredControls : controls).sort((a, b) => {
+        const ar = a.getBoundingClientRect();
+        const br = b.getBoundingClientRect();
+        return br.bottom - ar.bottom;
+      });
+
+      for (const button of ordered) {
+        const row = nearestControlRow(sidebar, button);
+        if (row) return createInlineSlot(row, button);
       }
+
       return null;
     };
 
+    const displaySnapshot = () =>
+      accountMode === "api"
+        ? {
+            fiveHour: { label: "API", pct: null, resetAt: null, apiMode: true },
+            weekly: null,
+            at: Date.now(),
+            apiMode: true,
+          }
+        :
+      snapshot && (snapshot.fiveHour || snapshot.weekly)
+        ? snapshot
+        : {
+            fiveHour: { label: "5h", pct: null, resetAt: null },
+            weekly: { label: "Weekly", pct: null, resetAt: null },
+            at: 0,
+          };
+
     const ensureMounted = (forceRebuild = false) => {
-      if (!snapshot || (!snapshot.fiveHour && !snapshot.weekly)) return;
+      const visibleSnapshot = displaySnapshot();
       const slot = findSidebarSlot();
+      document.querySelectorAll('[data-codexpp="usage-floating-slot"]').forEach((node) => node.remove());
       if (!slot) {
         if (mounted) {
           mounted.remove();
@@ -1061,22 +1261,24 @@ const FEATURES = {
       }
 
       if (mounted && slot.contains(mounted) && !forceRebuild) {
-        mounted._refresh?.(snapshot);
+        mounted._refresh?.(visibleSnapshot);
         return;
       }
       if (mounted) mounted.remove();
-      mounted = renderUsageBox(api, snapshot);
+      mounted = renderUsageBox(api, visibleSnapshot);
       mounted.dataset.codexpp = "usage-box";
       slot.appendChild(mounted);
+      lastMountedMode = slot.dataset.codexppUsageSlot || "unknown";
       mounted.style.flex = "0 1 auto";
       mounted.style.width = "auto";
       mounted.style.minWidth = "4.75rem";
       mounted.style.maxWidth = "8.5rem";
-      if (slot.dataset.codexppUsageSlot === "settings-inline-windows") {
+      if (slot.dataset.codexppUsageSlot === "settings-inline-windows" || slot.dataset.codexppUsageSlot === "controls-inline") {
         mounted.style.width = "auto";
         mounted.style.minWidth = "4.75rem";
       }
       log("mounted usage box", {
+        mode: lastMountedMode,
         slotTag: slot.tagName,
         slotClass: slot.className,
       });
@@ -1096,8 +1298,10 @@ const FEATURES = {
       scheduled = true;
       requestAnimationFrame(() => {
         scheduled = false;
-        refreshUsageFromApi();
-        if (!directUsageAvailable) {
+        refreshAccountMode().then((mode) => {
+          if (mode === "official") refreshUsageFromApi();
+        });
+        if (accountMode === "official" && !directUsageAvailable) {
           const grid = findBreakdownGrid();
           if (grid) scanBreakdown(grid);
           scanCompactUsage();
@@ -1128,6 +1332,9 @@ const FEATURES = {
       }
       for (const slot of document.querySelectorAll('[data-codexpp="usage-slot"]')) {
         if (slot instanceof HTMLElement && slot.children.length === 0) slot.remove();
+      }
+      for (const slot of document.querySelectorAll('[data-codexpp="usage-floating-slot"]')) {
+        slot.remove();
       }
     };
   },
@@ -7275,9 +7482,18 @@ function renderUsageBox(api, snapshot) {
 
   /** Pull the entry for `kind` out of the live snapshot. */
   const entryFor = (snap, k) => (k === "5h" ? snap.fiveHour : snap.weekly);
+  const isApiSnapshot = (snap) => !!snap?.apiMode || snap?.fiveHour?.apiMode;
 
   /** Apply colors + text for the *value* state (i.e. not hover). */
   const applyValueState = (snap) => {
+    if (isApiSnapshot(snap)) {
+      btn.classList.remove("bg-token-charts-red/10", "text-token-charts-red");
+      btn.classList.add("bg-token-foreground/5", "text-token-text-primary");
+      setText(left, "API");
+      setClass(left, "truncate");
+      right.replaceChildren();
+      return;
+    }
     const entry = entryFor(snap, kind);
     const pct = entry?.pct;
     const remaining = typeof pct === "number" ? pct : null;
@@ -7297,6 +7513,10 @@ function renderUsageBox(api, snapshot) {
 
   /** Replace the entire box content with the reset label. */
   const applyHoverState = (snap) => {
+    if (isApiSnapshot(snap)) {
+      applyValueState(snap);
+      return;
+    }
     const entry = entryFor(snap, kind);
     setText(left, "Resets:");
     setClass(left, "truncate text-token-text-secondary");
@@ -7324,6 +7544,11 @@ function renderUsageBox(api, snapshot) {
   btn.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
+    if (isApiSnapshot(currentSnap)) {
+      suppressHover = true;
+      applyValueState(currentSnap);
+      return;
+    }
     const i = ORDER.indexOf(kind);
     kind = ORDER[(i + 1) % ORDER.length];
     api.storage.set("usage:visible-kind", kind);
@@ -7438,28 +7663,255 @@ function switchControl(initial, onChange) {
   const features = [
     "hide-upgrade-prompts",
     "show-usage-in-sidebar",
-    "show-message-metrics-on-hover",
     "square-sidebar",
     "settings-search",
     "match-sidebar-width",
     "sidebar-action-grid",
     "sidebar-project-backgrounds",
+    "slash-menu-polish",
+    "show-message-metrics-on-hover",
     "sidebar-chat-multi-select",
     "show-pinned-chat-project-names",
-    "slash-menu-polish",
   ];
+  const featureInfo = [
+    {
+      id: "hide-upgrade-prompts",
+      title: "隐藏升级提示",
+      detail: "隐藏侧栏和顶部栏中的 Upgrade / Get Plus 提示。",
+      defaultEnabled: true,
+      status: "可用",
+    },
+    {
+      id: "show-usage-in-sidebar",
+      title: "5 小时 / 周额度",
+      detail: "优先通过 Codex renderer fetch bridge 读取 /wham/usage，失败时再解析页面里的额度 UI。点击可在 5h 和 Weekly 之间切换。",
+      defaultEnabled: true,
+      status: "当前页面暴露额度信号时可用",
+    },
+    {
+      id: "square-sidebar",
+      title: "侧栏方角",
+      detail: "去掉侧栏与主内容之间的圆角。",
+      defaultEnabled: false,
+      status: "可用",
+    },
+    {
+      id: "settings-search",
+      title: "设置搜索",
+      detail: "给 Codex 设置页增加搜索框。",
+      defaultEnabled: true,
+      status: "可用",
+    },
+    {
+      id: "match-sidebar-width",
+      title: "匹配设置页侧栏宽度",
+      detail: "让设置页侧栏宽度与主侧栏对齐。",
+      defaultEnabled: true,
+      status: "可用",
+    },
+    {
+      id: "sidebar-action-grid",
+      title: "侧栏动作网格",
+      detail: "把主要侧栏动作整理成紧凑网格。",
+      defaultEnabled: true,
+      status: "可用",
+    },
+    {
+      id: "sidebar-project-backgrounds",
+      title: "项目背景和颜色",
+      detail: "为项目行增加分组背景，并保留旧的项目颜色偏好。",
+      defaultEnabled: true,
+      status: "可用",
+    },
+    {
+      id: "slash-menu-polish",
+      title: "斜杠菜单优化",
+      detail: "压缩斜杠菜单行距，并强化选中状态。",
+      defaultEnabled: true,
+      status: "可用",
+    },
+    {
+      id: "show-message-metrics-on-hover",
+      title: "消息 token 指标",
+      detail: "旧实现需要从 main process 读取本地 Codex JSONL，而 BigPizzaV3 用户脚本无法访问这一层。",
+      defaultEnabled: false,
+      status: "当前运行环境不支持",
+      disabled: true,
+    },
+    {
+      id: "sidebar-chat-multi-select",
+      title: "侧栏会话多选",
+      detail: "选择界面可以部分运行，但批量 Pin / Archive / mini window 操作依赖旧的 Electron IPC。",
+      defaultEnabled: false,
+      status: "部分支持，默认关闭",
+    },
+    {
+      id: "show-pinned-chat-project-names",
+      title: "固定会话项目名",
+      detail: "旧实现需要从 main process 扫描本地会话文件。",
+      defaultEnabled: false,
+      status: "当前运行环境不支持",
+      disabled: true,
+    },
+  ];
+  const settingsObserver = new MutationObserver(installSettingsPanel);
+  settingsObserver.observe(document.documentElement, { childList: true, subtree: true });
+  installSettingsPanel();
+
+  function featureDefault(id) {
+    return featureInfo.find((item) => item.id === id)?.defaultEnabled ?? false;
+  }
+
+  function featureEnabled(id) {
+    const meta = featureInfo.find((item) => item.id === id);
+    if (meta?.disabled) return false;
+    return !!api.storage.get(`feature:${id}`, featureDefault(id));
+  }
+
+  function setFeatureEnabled(id, enabled) {
+    if (!features.includes(id)) {
+      throw new Error(`Unknown Bennett UI feature: ${id}`);
+    }
+    api.storage.set(`feature:${id}`, !!enabled);
+    const state = tweak._state;
+    if (state && typeof activateFeature === "function" && typeof deactivateFeature === "function") {
+      if (enabled) activateFeature(state, id);
+      else deactivateFeature(state, id);
+    }
+    refreshSettingsPanel();
+  }
+
+  function installSettingsPanel() {
+    const modal = document.querySelector(".codex-plus-modal-content");
+    if (!modal || modal.dataset.bennettUiSettingsVersion === VERSION) return;
+    const tabs = modal.querySelector(".codex-plus-tabs");
+    const body = modal.querySelector(".codex-plus-modal-body");
+    if (!tabs || !body) return;
+    modal.dataset.bennettUiSettingsVersion = VERSION;
+
+    tabs.querySelector('[data-codex-plus-tab="bennettUi"]')?.remove();
+    body.querySelector('[data-codex-plus-panel="bennettUi"]')?.remove();
+
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "codex-plus-tab-button";
+    tab.dataset.codexPlusTab = "bennettUi";
+    tab.dataset.active = "false";
+    tab.textContent = "Bennett UI 设置";
+    tabs.appendChild(tab);
+
+    const panel = document.createElement("div");
+    panel.className = "codex-plus-panel";
+    panel.dataset.codexPlusPanel = "bennettUi";
+    panel.hidden = true;
+    panel.innerHTML = settingsPanelHtml();
+    panel.addEventListener("click", (event) => {
+      const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+      const toggle = target?.closest("[data-bennett-ui-feature]");
+      if (!toggle) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const id = toggle.getAttribute("data-bennett-ui-feature");
+      const meta = featureInfo.find((item) => item.id === id);
+      if (!id || meta?.disabled) return;
+      setFeatureEnabled(id, !featureEnabled(id));
+    }, true);
+    body.appendChild(panel);
+    ensureSettingsStyle();
+    refreshSettingsPanel();
+  }
+
+  function settingsPanelHtml() {
+    return `
+      <div class="codex-plus-row bennett-ui-settings-head">
+        <div>
+          <div class="codex-plus-row-title">Bennett UI Improvements</div>
+          <div class="codex-plus-row-description">来源：b-nnett/codex-plusplus-bennett-ui。此迁移只保留能够在 BigPizzaV3 renderer-only 用户脚本环境中运行的功能。</div>
+          <div class="bennett-ui-settings-note">切换会尽量立即生效。如果 Codex DOM 变动导致残留，可重新加载用户脚本或重启 Codex++。</div>
+        </div>
+      </div>
+      ${featureInfo.map((item) => `
+        <div class="codex-plus-row bennett-ui-feature-row" data-bennett-ui-row="${escapeAttr(item.id)}">
+          <div>
+            <div class="codex-plus-row-title">${escapeHtmlLocal(item.title)}</div>
+            <div class="codex-plus-row-description">${escapeHtmlLocal(item.detail)}</div>
+            <div class="bennett-ui-feature-status">${escapeHtmlLocal(item.status)}</div>
+          </div>
+          <button type="button" class="codex-plus-toggle bennett-ui-toggle" data-bennett-ui-feature="${escapeAttr(item.id)}" ${item.disabled ? "disabled" : ""}><span></span></button>
+        </div>
+      `).join("")}
+    `;
+  }
+
+  function refreshSettingsPanel() {
+    for (const item of featureInfo) {
+      const row = document.querySelector(`[data-bennett-ui-row="${cssEscape(item.id)}"]`);
+      const toggle = row?.querySelector("[data-bennett-ui-feature]");
+      if (!toggle) continue;
+      toggle.dataset.enabled = String(featureEnabled(item.id));
+      toggle.dataset.support = item.disabled ? "unsupported" : "supported";
+      row.dataset.enabled = String(featureEnabled(item.id));
+    }
+  }
+
+  function ensureSettingsStyle() {
+    if (document.getElementById("bennett-ui-settings-style")) return;
+    const style = document.createElement("style");
+    style.id = "bennett-ui-settings-style";
+    style.textContent = `
+      .bennett-ui-settings-note,
+      .bennett-ui-feature-status {
+        margin-top: 6px;
+        color: var(--text-secondary, var(--color-token-text-secondary, #8b8b8b));
+        font-size: 12px;
+        line-height: 1.35;
+      }
+      .bennett-ui-feature-row[data-enabled="true"] .bennett-ui-feature-status {
+        color: var(--text-primary, var(--color-token-text-primary, #f5f5f5));
+      }
+      .bennett-ui-toggle[disabled] {
+        cursor: not-allowed;
+        opacity: 0.45;
+      }
+      .bennett-ui-toggle[data-enabled="true"] span {
+        transform: translateX(14px);
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function escapeHtmlLocal(value) {
+    return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    })[ch]);
+  }
+
+  function escapeAttr(value) {
+    return escapeHtmlLocal(value);
+  }
+
+  function cssEscape(value) {
+    if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(value);
+    return String(value).replace(/["\\]/g, "\\$&");
+  }
+
   window[INSTALL_KEY] = {
     version: VERSION,
     api,
     features,
+    featureInfo,
     setFeature(id, enabled, reload = true) {
-      if (!features.includes(id)) {
-        throw new Error(`Unknown Bennett UI feature: ${id}`);
-      }
-      api.storage.set(`feature:${id}`, !!enabled);
+      setFeatureEnabled(id, enabled);
       if (reload) window.location.reload();
     },
     stop() {
+      settingsObserver.disconnect();
+      document.querySelector('[data-codex-plus-tab="bennettUi"]')?.remove();
+      document.querySelector('[data-codex-plus-panel="bennettUi"]')?.remove();
       if (typeof tweak.stop === "function") {
         tweak.stop.call(tweak);
       }
@@ -7468,6 +7920,10 @@ function switchControl(initial, onChange) {
 
   function createBigPizzaRendererApi() {
     const storagePrefix = "bennett-ui-improvements:";
+    const blockedFeatureKeys = new Set([
+      "feature:show-message-metrics-on-hover",
+      "feature:show-pinned-chat-project-names",
+    ]);
     const noop = () => {};
     const logWith = (level) => (...args) => {
       const fn = console[level] || console.log || noop;
@@ -7476,6 +7932,7 @@ function switchControl(initial, onChange) {
 
     const storage = {
       get(key, fallback) {
+        if (blockedFeatureKeys.has(key)) return false;
         try {
           const raw = window.localStorage.getItem(storagePrefix + key);
           return raw == null ? fallback : JSON.parse(raw);
