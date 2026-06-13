@@ -39,7 +39,7 @@
       "id": "hide-usage-alert",
       "name": "Hide Usage Alert",
       "description": "隐藏额度提醒",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "author": "Ghibli1024",
       "tags": [
         "usage",
@@ -49,7 +49,7 @@
       ],
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/hide-usage-alert.js",
-      "sha256": "6f348e54d1be7367986d3e7cf349d21de74a87a47a1397cfcdb0715891b62bc3"
+      "sha256": "b13279be9d6707c3109d0f71c7c1b56b2645cb659cbbca6a67f438022f3bae9c"
     },
     {
       "id": "codex-token-usage",
