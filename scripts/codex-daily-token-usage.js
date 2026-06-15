@@ -1,0 +1,1793 @@
+// ==UserScript==
+// @name         Codex Daily Token Usage
+// @namespace    codex-plus-plus
+// @version      1.3.0
+// @description  每日 Token 统计，优先复用已有采集，必要时内置采集，支持日期切换、5 日趋势与分享图。
+// @match        app://-/*
+// @run-at       document-start
+// ==/UserScript==
+
+(() => {
+  "use strict";
+
+  const VERSION = "1.3.0";
+  const API_KEY = "__codexDailyTokenUsage";
+  const SOURCE_API_KEY = "__codexTokenUsage";
+  const STORAGE_KEY = "__codexDailyTokenUsageV1";
+  const ROOT_ID = "codex-daily-token-usage";
+  const PANEL_ID = "codex-daily-token-usage-panel";
+  const STYLE_ID = "codex-daily-token-usage-style";
+  const POLL_INTERVAL_MS = 1000;
+  const RETAIN_DAYS = 365;
+  const MAX_TURNS_PER_DAY = 2000;
+  const CAPTURE_DEDUPE_WINDOW_MS = 3000;
+  const MAX_CAPTURE_BODY_CHARS = 2_000_000;
+  const EXTERNAL_SOURCE_GRACE_MS = 4000;
+  const EXTERNAL_EMPTY_LIMIT = 4;
+  const TREND_DAYS = 5;
+
+  const previous = window[API_KEY];
+  if (previous && typeof previous.destroy === "function") {
+    try {
+      previous.destroy();
+    } catch {
+      // 旧实例清理失败不应阻止新实例加载。
+    }
+  }
+
+  let root = null;
+  let panel = null;
+  let style = null;
+  let observer = null;
+  let pollTimer = null;
+  let midnightTimer = null;
+  let closeTimer = null;
+  let shareFeedbackTimer = null;
+  let pinnedOpen = false;
+  let destroyed = false;
+  let sourceMode = "waiting";
+  let captureInstalled = false;
+  let lastCaptureAt = 0;
+  let captureSeq = 0;
+  let externalEmptyCount = 0;
+  let startedAt = Date.now();
+  let lastRenderedTotal = -1;
+  let lastDateKey = getDateKey(Date.now());
+  let selectedDateKey = lastDateKey;
+  let state = loadState();
+
+  function toCount(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? Math.round(number) : 0;
+  }
+
+  function firstCount(...values) {
+    for (const value of values) {
+      const number = toCount(value);
+      if (number > 0) return number;
+    }
+    return 0;
+  }
+
+  function getDateKey(timestamp) {
+    const date = new Date(timestamp);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  function parseDateKey(dateKey) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateKey || ""));
+    if (!match) return null;
+
+    const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+    if (
+      date.getFullYear() !== Number(match[1]) ||
+      date.getMonth() !== Number(match[2]) - 1 ||
+      date.getDate() !== Number(match[3])
+    ) {
+      return null;
+    }
+    date.setHours(12, 0, 0, 0);
+    return date;
+  }
+
+  function shiftDateKey(dateKey, days) {
+    const date = parseDateKey(dateKey);
+    if (!date) return getDateKey(Date.now());
+    date.setDate(date.getDate() + Number(days || 0));
+    return getDateKey(date.getTime());
+  }
+
+  function getMinimumDateKey(now = Date.now()) {
+    const date = new Date(now);
+    date.setHours(12, 0, 0, 0);
+    date.setDate(date.getDate() - RETAIN_DAYS + 1);
+    return getDateKey(date.getTime());
+  }
+
+  function clampDateKey(dateKey, now = Date.now()) {
+    const parsed = parseDateKey(dateKey);
+    const todayKey = getDateKey(now);
+    const minimumKey = getMinimumDateKey(now);
+    if (!parsed) return todayKey;
+    return dateKey < minimumKey ? minimumKey : dateKey > todayKey ? todayKey : dateKey;
+  }
+
+  function getTurnTimestamp(turn) {
+    const encoded = Number.parseInt(String(turn?.turnId || "").split("-")[0], 10);
+    if (Number.isFinite(encoded) && encoded > 1_500_000_000_000) return encoded;
+
+    const createdAt = Date.parse(turn?.createdAt || "");
+    if (Number.isFinite(createdAt)) return createdAt;
+
+    return Date.now();
+  }
+
+  function normalizeUsage(rawUsage) {
+    const usage = rawUsage && typeof rawUsage === "object" ? rawUsage : {};
+    const input = firstCount(
+      usage.inputTotalTokens,
+      usage.inputTokens,
+      usage.input_tokens,
+      usage.prompt_tokens
+    );
+    const output = firstCount(
+      usage.outputTotalTokens,
+      usage.outputTokens,
+      usage.output_tokens,
+      usage.completion_tokens
+    );
+    const cached = firstCount(
+      usage.cachedReadTokens,
+      usage.cachedTokens,
+      usage.cacheReadTokens,
+      usage.cached_input_tokens,
+      usage.input_tokens_details?.cached_tokens
+    );
+    const reasoning = firstCount(
+      usage.reasoningTokens,
+      usage.reasoning_tokens,
+      usage.output_tokens_details?.reasoning_tokens
+    );
+    const total = firstCount(
+      usage.requestTotalTokens,
+      usage.totalTokens,
+      usage.total_tokens,
+      input + output
+    );
+
+    return { input, output, cached, reasoning, total };
+  }
+
+  function isUsageTurn(turn) {
+    if (!turn || typeof turn !== "object" || !turn.turnId) return false;
+    const usage = normalizeUsage(turn.usage);
+    return usage.total > 0 && (usage.input > 0 || usage.output > 0);
+  }
+
+  function createEmptyState() {
+    return { version: 1, days: {} };
+  }
+
+  function loadState() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null");
+      if (parsed?.version === 1 && parsed.days && typeof parsed.days === "object") {
+        return parsed;
+      }
+    } catch {
+      // 损坏或不可访问的本地数据按空状态处理。
+    }
+    return createEmptyState();
+  }
+
+  function saveState() {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function pruneState(now = Date.now()) {
+    const cutoff = new Date(now);
+    cutoff.setHours(0, 0, 0, 0);
+    cutoff.setDate(cutoff.getDate() - RETAIN_DAYS + 1);
+
+    for (const key of Object.keys(state.days)) {
+      const timestamp = Date.parse(`${key}T00:00:00`);
+      if (!Number.isFinite(timestamp) || timestamp < cutoff.getTime()) {
+        delete state.days[key];
+      }
+    }
+  }
+
+  function upsertTurn(turn) {
+    if (!isUsageTurn(turn)) return false;
+
+    const timestamp = getTurnTimestamp(turn);
+    const dateKey = getDateKey(timestamp);
+    const usage = normalizeUsage(turn.usage);
+    const day = state.days[dateKey] || { turns: {}, updatedAt: 0 };
+    const existing = day.turns[turn.turnId];
+    const candidate = {
+      input: usage.input,
+      output: usage.output,
+      cached: usage.cached,
+      reasoning: usage.reasoning,
+      total: usage.total,
+      calls: Math.max(1, toCount(turn.callCount)),
+      updatedAt: timestamp,
+      source: String(turn.source || "turn-aggregate"),
+    };
+
+    if (existing && existing.total > candidate.total) return false;
+
+    const next = existing
+      ? {
+          input: Math.max(existing.input || 0, candidate.input),
+          output: Math.max(existing.output || 0, candidate.output),
+          cached: Math.max(existing.cached || 0, candidate.cached),
+          reasoning: Math.max(existing.reasoning || 0, candidate.reasoning),
+          total: Math.max(existing.total || 0, candidate.total),
+          calls: Math.max(existing.calls || 0, candidate.calls),
+          updatedAt: Math.max(existing.updatedAt || 0, candidate.updatedAt),
+          source: candidate.source,
+        }
+      : candidate;
+
+    if (existing && JSON.stringify(existing) === JSON.stringify(next)) return false;
+
+    day.turns[turn.turnId] = next;
+    day.updatedAt = Math.max(day.updatedAt || 0, timestamp);
+
+    const turnIds = Object.keys(day.turns);
+    if (turnIds.length > MAX_TURNS_PER_DAY) {
+      turnIds
+        .sort((a, b) => (day.turns[a].updatedAt || 0) - (day.turns[b].updatedAt || 0))
+        .slice(0, turnIds.length - MAX_TURNS_PER_DAY)
+        .forEach((id) => delete day.turns[id]);
+    }
+
+    state.days[dateKey] = day;
+    return true;
+  }
+
+  function aggregateDay(dateKey = getDateKey(Date.now())) {
+    const turns = Object.values(state.days[dateKey]?.turns || {});
+    return turns.reduce(
+      (summary, turn) => {
+        summary.input += toCount(turn.input);
+        summary.output += toCount(turn.output);
+        summary.cached += toCount(turn.cached);
+        summary.reasoning += toCount(turn.reasoning);
+        summary.total += toCount(turn.total);
+        summary.calls += Math.max(1, toCount(turn.calls));
+        summary.turns += 1;
+        summary.updatedAt = Math.max(summary.updatedAt, toCount(turn.updatedAt));
+        return summary;
+      },
+      {
+        dateKey,
+        input: 0,
+        output: 0,
+        cached: 0,
+        reasoning: 0,
+        total: 0,
+        calls: 0,
+        turns: 0,
+        updatedAt: 0,
+      }
+    );
+  }
+
+  function formatTrendDateLabel(dateKey) {
+    const date = parseDateKey(dateKey);
+    if (!date) return dateKey;
+    return `${date.getMonth() + 1}/${date.getDate()}`;
+  }
+
+  function buildTrendData(dateKey = selectedDateKey, days = TREND_DAYS) {
+    const endKey = clampDateKey(dateKey);
+    const count = Math.max(1, toCount(days) || TREND_DAYS);
+    const items = [];
+    for (let offset = count - 1; offset >= 0; offset -= 1) {
+      const itemDateKey = shiftDateKey(endKey, -offset);
+      const summary = aggregateDay(itemDateKey);
+      items.push({
+        dateKey: itemDateKey,
+        label: formatTrendDateLabel(itemDateKey),
+        total: toCount(summary.total),
+        input: toCount(summary.input),
+        output: toCount(summary.output),
+        calls: toCount(summary.calls),
+        active: itemDateKey === endKey,
+      });
+    }
+    const maxTotal = Math.max(1, ...items.map((item) => item.total));
+    return { dateKey: endKey, days: count, maxTotal, items };
+  }
+
+  function trendPoints(trend, width = 286, height = 76, padding = 8) {
+    const items = trend?.items || [];
+    if (!items.length) return [];
+    const usableWidth = Math.max(1, width - padding * 2);
+    const usableHeight = Math.max(1, height - padding * 2);
+    const denominator = Math.max(1, items.length - 1);
+    return items.map((item, index) => ({
+      ...item,
+      x: padding + (usableWidth * index) / denominator,
+      y: padding + usableHeight - (usableHeight * item.total) / Math.max(1, trend.maxTotal),
+    }));
+  }
+
+  function trendPath(points, smooth = true) {
+    if (!points.length) return "";
+    if (points.length === 1 || !smooth) {
+      return points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`).join(" ");
+    }
+
+    let path = `M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`;
+    for (let index = 1; index < points.length; index += 1) {
+      const previous = points[index - 1];
+      const current = points[index];
+      const controlX = (previous.x + current.x) / 2;
+      path += ` C ${controlX.toFixed(1)} ${previous.y.toFixed(1)}, ${controlX.toFixed(1)} ${current.y.toFixed(1)}, ${current.x.toFixed(1)} ${current.y.toFixed(1)}`;
+    }
+    return path;
+  }
+
+  function formatCompact(value) {
+    const count = toCount(value);
+    if (count < 1000) return String(count);
+    if (count < 1_000_000) return `${stripTrailingZero(count / 1000)}K`;
+    if (count < 1_000_000_000) return `${stripTrailingZero(count / 1_000_000)}M`;
+    return `${stripTrailingZero(count / 1_000_000_000)}B`;
+  }
+
+  function stripTrailingZero(value) {
+    const digits = value >= 100 ? 0 : value >= 10 ? 1 : 2;
+    return String(Number(value.toFixed(digits)));
+  }
+
+  function formatExact(value) {
+    return new Intl.NumberFormat("zh-CN").format(toCount(value));
+  }
+
+  function formatTime(timestamp) {
+    if (!timestamp) return "暂无";
+    return new Intl.DateTimeFormat("zh-CN", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).format(new Date(timestamp));
+  }
+
+  function formatDisplayDate(dateKey) {
+    const date = parseDateKey(dateKey);
+    if (!date) return dateKey;
+    return new Intl.DateTimeFormat("zh-CN", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      weekday: "short",
+    }).format(date);
+  }
+
+  function buildShareModel(snapshot) {
+    const input = toCount(snapshot?.input);
+    const output = toCount(snapshot?.output);
+    const cached = toCount(snapshot?.cached);
+    const total = toCount(snapshot?.total);
+    return {
+      dateKey: snapshot?.dateKey || getDateKey(Date.now()),
+      dateLabel: formatDisplayDate(snapshot?.dateKey || getDateKey(Date.now())),
+      input,
+      output,
+      cached,
+      reasoning: toCount(snapshot?.reasoning),
+      total,
+      calls: toCount(snapshot?.calls),
+      turns: toCount(snapshot?.turns),
+      cacheRate: input > 0 ? Math.min(100, (cached / input) * 100) : 0,
+      outputRate: total > 0 ? Math.min(100, (output / total) * 100) : 0,
+      trend: buildTrendData(snapshot?.dateKey || getDateKey(Date.now())),
+    };
+  }
+
+  function roundedRectPath(context, x, y, width, height, radius) {
+    const r = Math.min(radius, width / 2, height / 2);
+    context.beginPath();
+    context.moveTo(x + r, y);
+    context.lineTo(x + width - r, y);
+    context.quadraticCurveTo(x + width, y, x + width, y + r);
+    context.lineTo(x + width, y + height - r);
+    context.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+    context.lineTo(x + r, y + height);
+    context.quadraticCurveTo(x, y + height, x, y + height - r);
+    context.lineTo(x, y + r);
+    context.quadraticCurveTo(x, y, x + r, y);
+    context.closePath();
+  }
+
+  function fillRoundedRect(context, x, y, width, height, radius, fillStyle) {
+    roundedRectPath(context, x, y, width, height, radius);
+    context.fillStyle = fillStyle;
+    context.fill();
+  }
+
+  function drawMetricCard(context, { x, y, width, label, value, accent }) {
+    fillRoundedRect(context, x, y, width, 142, 24, "rgba(255, 255, 255, 0.075)");
+    context.strokeStyle = "rgba(255, 255, 255, 0.13)";
+    context.lineWidth = 1.5;
+    roundedRectPath(context, x, y, width, 142, 24);
+    context.stroke();
+
+    fillRoundedRect(context, x + 22, y + 22, 10, 10, 5, accent);
+    context.fillStyle = "rgba(226, 232, 255, 0.66)";
+    context.font = '500 24px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+    context.fillText(label, x + 22, y + 63);
+
+    context.fillStyle = "#ffffff";
+    context.font = '700 34px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif';
+    context.fillText(value, x + 22, y + 112);
+  }
+
+  function drawShareTrend(context, trend, x, y, width, height) {
+    fillRoundedRect(context, x, y, width, height, 28, "rgba(5, 8, 24, 0.4)");
+    context.strokeStyle = "rgba(255, 255, 255, 0.1)";
+    roundedRectPath(context, x, y, width, height, 28);
+    context.stroke();
+
+    context.fillStyle = "#ffffff";
+    context.font = '650 25px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+    context.fillText("近 5 日 Token 趋势", x + 30, y + 45);
+
+    context.textAlign = "right";
+    context.fillStyle = "rgba(226, 232, 255, 0.58)";
+    context.font = '500 20px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+    context.fillText(`峰值 ${formatCompact(trend.maxTotal)}`, x + width - 30, y + 45);
+    context.textAlign = "left";
+
+    const chart = { x: x + 34, y: y + 62, width: width - 68, height: 88 };
+    context.strokeStyle = "rgba(255, 255, 255, 0.08)";
+    context.lineWidth = 1;
+    for (let index = 0; index < 3; index += 1) {
+      const gridY = chart.y + (chart.height * index) / 2;
+      context.beginPath();
+      context.moveTo(chart.x, gridY);
+      context.lineTo(chart.x + chart.width, gridY);
+      context.stroke();
+    }
+
+    const points = trendPoints(trend, chart.width, chart.height, 4).map((point) => ({
+      ...point,
+      x: point.x + chart.x,
+      y: point.y + chart.y,
+    }));
+    if (points.length > 0) {
+      const area = `${trendPath(points, true)} L ${points[points.length - 1].x.toFixed(1)} ${(chart.y + chart.height).toFixed(1)} L ${points[0].x.toFixed(1)} ${(chart.y + chart.height).toFixed(1)} Z`;
+      const areaGradient = context.createLinearGradient(0, chart.y, 0, chart.y + chart.height);
+      areaGradient.addColorStop(0, "rgba(76, 181, 255, 0.28)");
+      areaGradient.addColorStop(1, "rgba(123, 92, 255, 0.02)");
+      context.fillStyle = areaGradient;
+      const areaPath = new Path2D(area);
+      context.fill(areaPath);
+
+      const lineGradient = context.createLinearGradient(chart.x, 0, chart.x + chart.width, 0);
+      lineGradient.addColorStop(0, "#44B9FF");
+      lineGradient.addColorStop(1, "#9B7CFF");
+      context.strokeStyle = lineGradient;
+      context.lineWidth = 5;
+      context.lineCap = "round";
+      context.lineJoin = "round";
+      context.stroke(new Path2D(trendPath(points, true)));
+
+      for (const point of points) {
+        context.fillStyle = point.active ? "#FFFFFF" : "rgba(255, 255, 255, 0.78)";
+        context.beginPath();
+        context.arc(point.x, point.y, point.active ? 7 : 5, 0, Math.PI * 2);
+        context.fill();
+        context.fillStyle = point.active ? "#8A6CFF" : "#42B8FF";
+        context.beginPath();
+        context.arc(point.x, point.y, point.active ? 3 : 2.5, 0, Math.PI * 2);
+        context.fill();
+      }
+    }
+
+    context.fillStyle = "rgba(226, 232, 255, 0.52)";
+    context.font = '500 18px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+    context.textAlign = "center";
+    const labelY = y + height - 26;
+    const denominator = Math.max(1, trend.items.length - 1);
+    trend.items.forEach((item, index) => {
+      const labelX = chart.x + (chart.width * index) / denominator;
+      context.fillStyle = item.active ? "#FFFFFF" : "rgba(226, 232, 255, 0.52)";
+      context.fillText(item.label, labelX, labelY);
+    });
+    context.textAlign = "left";
+  }
+
+  function createShareCanvas(dateKey = selectedDateKey) {
+    const model = buildShareModel(aggregateDay(clampDateKey(dateKey)));
+    const canvas = document.createElement("canvas");
+    canvas.width = 1200;
+    canvas.height = 900;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("当前环境不支持 Canvas 2D");
+
+    const background = context.createLinearGradient(0, 0, 1200, 900);
+    background.addColorStop(0, "#070A18");
+    background.addColorStop(0.5, "#11132D");
+    background.addColorStop(1, "#21104A");
+    context.fillStyle = background;
+    context.fillRect(0, 0, 1200, 900);
+
+    const blueGlow = context.createRadialGradient(160, 120, 0, 160, 120, 430);
+    blueGlow.addColorStop(0, "rgba(35, 160, 255, 0.34)");
+    blueGlow.addColorStop(1, "rgba(35, 160, 255, 0)");
+    context.fillStyle = blueGlow;
+    context.fillRect(0, 0, 650, 650);
+
+    const purpleGlow = context.createRadialGradient(1080, 800, 0, 1080, 800, 520);
+    purpleGlow.addColorStop(0, "rgba(153, 72, 255, 0.34)");
+    purpleGlow.addColorStop(1, "rgba(153, 72, 255, 0)");
+    context.fillStyle = purpleGlow;
+    context.fillRect(500, 300, 700, 600);
+
+    context.fillStyle = "rgba(255, 255, 255, 0.035)";
+    for (let x = 40; x < 1200; x += 42) {
+      for (let y = 38; y < 900; y += 42) {
+        context.beginPath();
+        context.arc(x, y, 1.5, 0, Math.PI * 2);
+        context.fill();
+      }
+    }
+
+    fillRoundedRect(context, 70, 58, 194, 46, 23, "rgba(65, 166, 255, 0.16)");
+    context.strokeStyle = "rgba(89, 181, 255, 0.35)";
+    roundedRectPath(context, 70, 58, 194, 46, 23);
+    context.stroke();
+    context.fillStyle = "#72C3FF";
+    context.font = '700 19px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif';
+    context.fillText("CODEX  /  TOKEN", 93, 89);
+
+    context.textAlign = "right";
+    context.fillStyle = "rgba(226, 232, 255, 0.72)";
+    context.font = '500 24px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+    context.fillText(model.dateLabel, 1130, 87);
+    context.textAlign = "left";
+
+    context.fillStyle = "rgba(226, 232, 255, 0.66)";
+    context.font = '600 27px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+    context.fillText("当日累计 TOKEN", 72, 176);
+
+    const totalText = formatExact(model.total);
+    const totalFontSize = totalText.length > 12 ? 82 : totalText.length > 9 ? 98 : 116;
+    const totalGradient = context.createLinearGradient(70, 205, 800, 330);
+    totalGradient.addColorStop(0, "#FFFFFF");
+    totalGradient.addColorStop(0.55, "#A9DDFF");
+    totalGradient.addColorStop(1, "#C5A7FF");
+    context.fillStyle = totalGradient;
+    context.font = `750 ${totalFontSize}px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif`;
+    context.fillText(totalText, 66, 304);
+
+    context.fillStyle = "rgba(226, 232, 255, 0.48)";
+    context.font = '500 21px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+    context.fillText(`${formatExact(model.turns)} 个 turn  ·  ${formatExact(model.calls)} 次请求`, 73, 350);
+
+    const cardWidth = 250;
+    const gap = 22;
+    const cardY = 410;
+    drawMetricCard(context, {
+      x: 70,
+      y: cardY,
+      width: cardWidth,
+      label: "输入 Token",
+      value: formatCompact(model.input),
+      accent: "#4FB6FF",
+    });
+    drawMetricCard(context, {
+      x: 70 + cardWidth + gap,
+      y: cardY,
+      width: cardWidth,
+      label: "输出 Token",
+      value: formatCompact(model.output),
+      accent: "#9D7CFF",
+    });
+    drawMetricCard(context, {
+      x: 70 + (cardWidth + gap) * 2,
+      y: cardY,
+      width: cardWidth,
+      label: "缓存输入",
+      value: formatCompact(model.cached),
+      accent: "#4EE4B1",
+    });
+    drawMetricCard(context, {
+      x: 70 + (cardWidth + gap) * 3,
+      y: cardY,
+      width: cardWidth,
+      label: "推理 Token",
+      value: formatCompact(model.reasoning),
+      accent: "#FFB35A",
+    });
+
+    drawShareTrend(context, model.trend, 70, 590, 1066, 188);
+
+    context.fillStyle = "rgba(226, 232, 255, 0.46)";
+    context.font = '500 19px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+    context.fillText("数据仅来自本机 Codex++，不包含会话内容", 72, 833);
+    context.textAlign = "right";
+    context.fillStyle = "rgba(114, 195, 255, 0.72)";
+    context.font = '650 19px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif';
+    context.fillText("GENERATED LOCALLY", 1129, 833);
+    context.textAlign = "left";
+
+    return canvas;
+  }
+
+  function canvasToBlob(canvas) {
+    return new Promise((resolve, reject) => {
+      canvas.toBlob((blob) => {
+        if (blob) resolve(blob);
+        else reject(new Error("分享图片生成失败"));
+      }, "image/png");
+    });
+  }
+
+  async function createShareBlob(dateKey = selectedDateKey) {
+    return canvasToBlob(createShareCanvas(dateKey));
+  }
+
+  async function copyShareImage(dateKey = selectedDateKey) {
+    const clipboard = window.navigator?.clipboard;
+    const ClipboardItemClass = window.ClipboardItem;
+    if (!clipboard?.write || typeof ClipboardItemClass !== "function") {
+      throw new Error("当前环境不支持复制图片到剪贴板");
+    }
+
+    const blobPromise = createShareBlob(dateKey);
+    await clipboard.write([new ClipboardItemClass({ "image/png": blobPromise })]);
+    const blob = await blobPromise;
+    return { dateKey: clampDateKey(dateKey), size: blob.size, type: blob.type };
+  }
+
+  const recentCaptureKeys = new Map();
+
+  function cleanupRecentCaptureKeys(now = Date.now()) {
+    for (const [key, timestamp] of recentCaptureKeys) {
+      if (now - timestamp > CAPTURE_DEDUPE_WINDOW_MS * 4) {
+        recentCaptureKeys.delete(key);
+      }
+    }
+  }
+
+  function requestUrl(input) {
+    if (typeof input === "string") return input;
+    if (input?.url) return String(input.url);
+    return "";
+  }
+
+  function isLikelyUsageUrl(url) {
+    const text = String(url || "").toLowerCase();
+    return /codex|conversation|responses|completion|chat|backend-api|openai/.test(text);
+  }
+
+  function safeParseJson(text) {
+    if (typeof text !== "string") return null;
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return null;
+    }
+  }
+
+  function parseTextPayloads(text) {
+    if (typeof text !== "string" || !text.trim() || text.length > MAX_CAPTURE_BODY_CHARS) {
+      return [];
+    }
+
+    const parsed = safeParseJson(text);
+    if (parsed) return [parsed];
+
+    const payloads = [];
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed === "data: [DONE]") continue;
+      const data = trimmed.startsWith("data:") ? trimmed.slice(5).trim() : trimmed;
+      const item = safeParseJson(data);
+      if (item) payloads.push(item);
+    }
+    return payloads;
+  }
+
+  function extractCandidateId(value) {
+    if (!value || typeof value !== "object") return "";
+    const candidates = [
+      value.response_id,
+      value.responseId,
+      value.request_id,
+      value.requestId,
+      value.event_id,
+      value.eventId,
+      value.message_id,
+      value.messageId,
+      value.id,
+      value.response?.id,
+      value.message?.id,
+      value.data?.id,
+      value.result?.id,
+    ];
+    const id = candidates.find((candidate) => typeof candidate === "string" && candidate.trim());
+    return id ? id.trim() : "";
+  }
+
+  function normalizeCaptureUsage(rawUsage) {
+    const usage = normalizeUsage(rawUsage);
+    if (!usage.total || (!usage.input && !usage.output)) return null;
+    return usage;
+  }
+
+  function findUsageCandidates(value, depth = 0, inheritedId = "") {
+    if (!value || depth > 8) return [];
+    if (typeof value === "string") {
+      return parseTextPayloads(value).flatMap((item) => findUsageCandidates(item, depth + 1, inheritedId));
+    }
+    if (Array.isArray(value)) {
+      return value.flatMap((item) => findUsageCandidates(item, depth + 1, inheritedId));
+    }
+    if (typeof value !== "object") return [];
+
+    const id = extractCandidateId(value) || inheritedId;
+    const candidates = [];
+    const directKeys = [
+      "usage",
+      "token_usage",
+      "tokenUsage",
+      "last_usage",
+      "lastUsage",
+      "last_token_usage",
+      "lastTokenUsage",
+    ];
+
+    for (const key of directKeys) {
+      const usage = normalizeCaptureUsage(value[key]);
+      if (usage) candidates.push({ usage, id });
+    }
+
+    const selfUsage = normalizeCaptureUsage(value);
+    if (selfUsage) candidates.push({ usage: selfUsage, id });
+
+    for (const key of [
+      "response",
+      "data",
+      "body",
+      "message",
+      "result",
+      "event",
+      "params",
+      "payload",
+      "delta",
+      "item",
+      "output",
+      "details",
+    ]) {
+      candidates.push(...findUsageCandidates(value[key], depth + 1, id));
+    }
+
+    return dedupeCandidates(candidates);
+  }
+
+  function usageSignature(usage) {
+    return [
+      toCount(usage.input),
+      toCount(usage.output),
+      toCount(usage.cached),
+      toCount(usage.reasoning),
+      toCount(usage.total),
+    ].join(":");
+  }
+
+  function dedupeCandidates(candidates) {
+    const seen = new Set();
+    return candidates.filter((candidate) => {
+      const key = `${candidate.id || ""}|${usageSignature(candidate.usage)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  function rememberCapturedUsage(candidate, source, url = "") {
+    const now = Date.now();
+    cleanupRecentCaptureKeys(now);
+    const signature = usageSignature(candidate.usage);
+    const dedupeKey = candidate.id
+      ? `id:${candidate.id}|${signature}`
+      : `near:${signature}|${Math.floor(now / CAPTURE_DEDUPE_WINDOW_MS)}`;
+    if (recentCaptureKeys.has(dedupeKey)) return false;
+    recentCaptureKeys.set(dedupeKey, now);
+
+    const turnId = candidate.id
+      ? `capture:${candidate.id}`
+      : `${now}-${++captureSeq}`;
+    const changed = upsertTurn({
+      turnId,
+      source: `capture:${source}`,
+      callCount: 1,
+      createdAt: new Date(now).toISOString(),
+      usage: {
+        inputTokens: candidate.usage.input,
+        outputTokens: candidate.usage.output,
+        cachedReadTokens: candidate.usage.cached,
+        reasoningTokens: candidate.usage.reasoning,
+        totalTokens: candidate.usage.total,
+        hasBreakdown: true,
+      },
+      url,
+    });
+
+    if (changed) {
+      lastCaptureAt = now;
+      sourceMode = "standalone";
+    }
+    return changed;
+  }
+
+  function processCapturePayload(payload, source, url = "") {
+    if (sourceMode === "external") return false;
+    const candidates = findUsageCandidates(payload);
+    if (!candidates.length) return false;
+    let changed = false;
+    for (const candidate of candidates) {
+      changed = rememberCapturedUsage(candidate, source, url) || changed;
+    }
+    if (changed) {
+      pruneState();
+      saveState();
+      render({ animate: true });
+    }
+    return changed;
+  }
+
+  function installFetchCapture() {
+    if (typeof window.fetch !== "function" || window.fetch.__codexDailyTokenUsageWrapped === VERSION) return;
+    const originalFetch = window.fetch;
+    async function wrappedFetch(input, init) {
+      const url = requestUrl(input);
+      const response = await originalFetch.call(this, input, init);
+      const contentType = String(response?.headers?.get?.("content-type") || "");
+      if (response?.clone && (isLikelyUsageUrl(url) || /json|event-stream|text/.test(contentType))) {
+        response
+          .clone()
+          .text()
+          .then((text) => processCapturePayload(text, "fetch", url))
+          .catch(() => {});
+      }
+      return response;
+    }
+    wrappedFetch.__codexDailyTokenUsageWrapped = VERSION;
+    wrappedFetch.__codexDailyTokenUsageOriginal = originalFetch;
+    window.fetch = wrappedFetch;
+  }
+
+  function installXhrCapture() {
+    const Xhr = window.XMLHttpRequest;
+    if (!Xhr?.prototype || Xhr.prototype.__codexDailyTokenUsageWrapped === VERSION) return;
+    const originalOpen = Xhr.prototype.open;
+    const originalSend = Xhr.prototype.send;
+    Xhr.prototype.open = function open(method, url, ...rest) {
+      this.__codexDailyTokenUsageUrl = url;
+      return originalOpen.call(this, method, url, ...rest);
+    };
+    Xhr.prototype.send = function send(...args) {
+      this.addEventListener?.("loadend", () => {
+        const url = this.__codexDailyTokenUsageUrl || "";
+        if (!isLikelyUsageUrl(url) && !String(this.getResponseHeader?.("content-type") || "").match(/json|event-stream|text/)) {
+          return;
+        }
+        try {
+          processCapturePayload(this.responseText || "", "xhr", url);
+        } catch {
+          // Ignore unreadable XHR bodies.
+        }
+      });
+      return originalSend.apply(this, args);
+    };
+    Xhr.prototype.__codexDailyTokenUsageOriginalOpen = originalOpen;
+    Xhr.prototype.__codexDailyTokenUsageOriginalSend = originalSend;
+    Xhr.prototype.__codexDailyTokenUsageWrapped = VERSION;
+  }
+
+  function installWebSocketCapture() {
+    if (typeof window.WebSocket !== "function" || window.WebSocket.__codexDailyTokenUsageWrapped === VERSION) return;
+    const NativeWebSocket = window.WebSocket;
+    function DailyTokenUsageWebSocket(...args) {
+      const socket = new NativeWebSocket(...args);
+      socket.addEventListener?.("message", (event) => {
+        try {
+          if (typeof event.data === "string") {
+            processCapturePayload(event.data, "websocket");
+          } else if (event.data instanceof Blob && event.data.size <= 512000) {
+            event.data.text().then((text) => processCapturePayload(text, "websocket")).catch(() => {});
+          }
+        } catch {
+          // Keep socket delivery untouched.
+        }
+      });
+      return socket;
+    }
+    try {
+      DailyTokenUsageWebSocket.prototype = NativeWebSocket.prototype;
+      Object.defineProperty(DailyTokenUsageWebSocket, "CONNECTING", { value: NativeWebSocket.CONNECTING });
+      Object.defineProperty(DailyTokenUsageWebSocket, "OPEN", { value: NativeWebSocket.OPEN });
+      Object.defineProperty(DailyTokenUsageWebSocket, "CLOSING", { value: NativeWebSocket.CLOSING });
+      Object.defineProperty(DailyTokenUsageWebSocket, "CLOSED", { value: NativeWebSocket.CLOSED });
+    } catch {
+      // Best-effort compatibility.
+    }
+    DailyTokenUsageWebSocket.__codexDailyTokenUsageWrapped = VERSION;
+    DailyTokenUsageWebSocket.__codexDailyTokenUsageOriginal = NativeWebSocket;
+    window.WebSocket = DailyTokenUsageWebSocket;
+  }
+
+  function installMessageCapture() {
+    if (window.__codexDailyTokenUsageMessageCapture === VERSION) return;
+    window.addEventListener?.(
+      "message",
+      (event) => {
+        try {
+          processCapturePayload(event.data, "post-message");
+        } catch {
+          // Ignore unrelated messages.
+        }
+      },
+      true
+    );
+    window.__codexDailyTokenUsageMessageCapture = VERSION;
+  }
+
+  function installStandaloneCapture() {
+    if (captureInstalled) return false;
+    installFetchCapture();
+    installXhrCapture();
+    installWebSocketCapture();
+    installMessageCapture();
+    captureInstalled = true;
+    sourceMode = "standalone";
+    return true;
+  }
+
+  function restoreStandaloneCapture() {
+    if (window.fetch?.__codexDailyTokenUsageWrapped === VERSION) {
+      window.fetch = window.fetch.__codexDailyTokenUsageOriginal;
+    }
+    const Xhr = window.XMLHttpRequest;
+    if (Xhr?.prototype?.__codexDailyTokenUsageWrapped === VERSION) {
+      Xhr.prototype.open = Xhr.prototype.__codexDailyTokenUsageOriginalOpen;
+      Xhr.prototype.send = Xhr.prototype.__codexDailyTokenUsageOriginalSend;
+      delete Xhr.prototype.__codexDailyTokenUsageWrapped;
+    }
+    if (window.WebSocket?.__codexDailyTokenUsageWrapped === VERSION) {
+      window.WebSocket = window.WebSocket.__codexDailyTokenUsageOriginal;
+    }
+    captureInstalled = false;
+  }
+
+  function readExternalTurns() {
+    const source = window[SOURCE_API_KEY];
+    if (!source || typeof source.export !== "function") {
+      return [];
+    }
+
+    try {
+      const exported = source.export();
+      return Array.isArray(exported?.turns) ? exported.turns : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function externalSourceAvailable() {
+    return typeof window[SOURCE_API_KEY]?.export === "function";
+  }
+
+  function shouldInstallStandaloneCapture(externalTurns) {
+    if (captureInstalled) return false;
+    if (!externalSourceAvailable()) {
+      return Date.now() - startedAt >= EXTERNAL_SOURCE_GRACE_MS;
+    }
+    if (externalTurns.length > 0) return false;
+    externalEmptyCount += 1;
+    return externalEmptyCount >= EXTERNAL_EMPTY_LIMIT;
+  }
+
+  function syncFromSource() {
+    let changed = false;
+    const externalTurns = readExternalTurns();
+
+    if (externalTurns.length > 0) {
+      sourceMode = "external";
+      externalEmptyCount = 0;
+      if (captureInstalled) restoreStandaloneCapture();
+    } else if (captureInstalled) {
+      sourceMode = "standalone";
+    } else {
+      sourceMode = "waiting";
+    }
+
+    for (const turn of externalTurns) {
+      changed = upsertTurn(turn) || changed;
+    }
+
+    if (shouldInstallStandaloneCapture(externalTurns)) {
+      installStandaloneCapture();
+    }
+
+    if (changed) {
+      pruneState();
+      saveState();
+    }
+    return changed;
+  }
+
+  function installStyle() {
+    if (document.getElementById(STYLE_ID)) {
+      style = document.getElementById(STYLE_ID);
+      return;
+    }
+
+    style = document.createElement("style");
+    style.id = STYLE_ID;
+    style.textContent = `
+      #${ROOT_ID} {
+        position: relative;
+        display: flex;
+        flex: 0 0 auto;
+        align-items: center;
+        pointer-events: auto;
+        -webkit-app-region: no-drag;
+        z-index: 2147483600;
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      #${ROOT_ID}.codex-daily-floating {
+        position: fixed;
+        top: 10px;
+        right: 80px;
+      }
+      #${ROOT_ID} .codex-daily-trigger {
+        box-sizing: border-box;
+        height: 31px;
+        min-width: 94px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding: 0 10px;
+        border: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.22));
+        border-radius: 9px;
+        color: var(--color-token-foreground, #202020);
+        background: var(--color-token-background-secondary, rgba(127, 127, 127, 0.08));
+        box-shadow: none;
+        cursor: default;
+        font: inherit;
+        font-size: 12px;
+        line-height: 1;
+        white-space: nowrap;
+        user-select: none;
+        outline: none;
+        transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+        -webkit-app-region: no-drag;
+      }
+      #${ROOT_ID} .codex-daily-trigger:hover,
+      #${ROOT_ID} .codex-daily-trigger:focus-visible,
+      #${ROOT_ID}.is-open .codex-daily-trigger {
+        background: var(--color-token-background-tertiary, rgba(127, 127, 127, 0.15));
+        border-color: var(--color-token-border-strong, rgba(127, 127, 127, 0.36));
+      }
+      #${ROOT_ID}.is-updated .codex-daily-trigger {
+        animation: codex-daily-token-pulse 420ms ease;
+      }
+      #${ROOT_ID} .codex-daily-sigma {
+        width: 16px;
+        height: 16px;
+        display: inline-grid;
+        place-items: center;
+        border-radius: 5px;
+        background: rgba(74, 144, 226, 0.14);
+        color: #4a90e2;
+        font-size: 12px;
+        font-weight: 700;
+      }
+      #${ROOT_ID} .codex-daily-total {
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+      #${PANEL_ID} {
+        position: fixed;
+        width: min(350px, calc(100vw - 24px));
+        box-sizing: border-box;
+        padding: 14px;
+        border: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.24));
+        border-radius: 12px;
+        color: var(--color-token-foreground, #202020);
+        background: var(--color-token-background, #ffffff);
+        box-shadow: 0 14px 40px rgba(0, 0, 0, 0.18);
+        opacity: 0;
+        visibility: hidden;
+        transform: translateY(-4px);
+        transition: opacity 120ms ease, visibility 120ms ease, transform 120ms ease;
+        pointer-events: none;
+        cursor: default;
+        z-index: 2147483647;
+        font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        -webkit-app-region: no-drag;
+      }
+      #${PANEL_ID}.is-visible {
+        opacity: 1;
+        visibility: visible;
+        transform: translateY(0);
+        pointer-events: auto;
+      }
+      #${PANEL_ID} .codex-daily-heading {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+      #${PANEL_ID} .codex-daily-title {
+        font-size: 13px;
+        font-weight: 650;
+      }
+      #${PANEL_ID} .codex-daily-date-nav {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        padding: 2px;
+        border: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.2));
+        border-radius: 8px;
+        background: var(--color-token-background-secondary, rgba(127, 127, 127, 0.07));
+      }
+      #${PANEL_ID} .codex-daily-date-button {
+        width: 23px;
+        height: 23px;
+        display: inline-grid;
+        place-items: center;
+        padding: 0;
+        border: 0;
+        border-radius: 6px;
+        color: var(--color-token-foreground-secondary, #737373);
+        background: transparent;
+        cursor: pointer;
+        font: inherit;
+        font-size: 16px;
+        line-height: 1;
+      }
+      #${PANEL_ID} .codex-daily-date-button:hover:not(:disabled) {
+        color: var(--color-token-foreground, #202020);
+        background: var(--color-token-background-tertiary, rgba(127, 127, 127, 0.14));
+      }
+      #${PANEL_ID} .codex-daily-date-button:disabled {
+        cursor: default;
+        opacity: 0.28;
+      }
+      #${PANEL_ID} .codex-daily-date-input {
+        width: 105px;
+        height: 23px;
+        box-sizing: border-box;
+        padding: 0 2px;
+        border: 0;
+        outline: 0;
+        color: var(--color-token-foreground-secondary, #737373);
+        background: transparent;
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+        line-height: 23px;
+        color-scheme: light dark;
+      }
+      #${PANEL_ID} .codex-daily-hero {
+        margin-bottom: 12px;
+        font-size: 26px;
+        line-height: 1.1;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+      #${PANEL_ID} .codex-daily-grid {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 8px 16px;
+        padding: 11px 0;
+        border-top: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.18));
+        border-bottom: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.18));
+        font-size: 12px;
+      }
+      #${PANEL_ID} .codex-daily-label {
+        color: var(--color-token-foreground-secondary, #737373);
+      }
+      #${PANEL_ID} .codex-daily-value {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        font-weight: 550;
+      }
+      #${PANEL_ID} .codex-daily-trend {
+        margin-top: 11px;
+        padding: 10px 11px 9px;
+        border: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.18));
+        border-radius: 10px;
+        background: var(--color-token-background-secondary, rgba(127, 127, 127, 0.06));
+      }
+      #${PANEL_ID} .codex-daily-trend-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 6px;
+        font-size: 11px;
+      }
+      #${PANEL_ID} .codex-daily-trend-title {
+        color: var(--color-token-foreground, #202020);
+        font-weight: 650;
+      }
+      #${PANEL_ID} .codex-daily-trend-peak {
+        color: var(--color-token-foreground-secondary, #737373);
+        font-variant-numeric: tabular-nums;
+      }
+      #${PANEL_ID} .codex-daily-trend-svg {
+        display: block;
+        width: 100%;
+        height: 82px;
+        overflow: visible;
+      }
+      #${PANEL_ID} .codex-daily-trend-labels {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 4px;
+        margin-top: 4px;
+        color: var(--color-token-foreground-secondary, #737373);
+        font-size: 10px;
+        font-variant-numeric: tabular-nums;
+        text-align: center;
+      }
+      #${PANEL_ID} .codex-daily-trend-labels span.is-active {
+        color: var(--color-token-foreground, #202020);
+        font-weight: 650;
+      }
+      #${PANEL_ID} .codex-daily-foot {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-top: 11px;
+        color: var(--color-token-foreground-secondary, #737373);
+        font-size: 11px;
+        line-height: 1.45;
+      }
+      #${PANEL_ID} .codex-daily-status-wrap {
+        min-width: 0;
+        display: flex;
+        align-items: center;
+        gap: 7px;
+      }
+      #${PANEL_ID} .codex-daily-status-text {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${PANEL_ID} .codex-daily-status {
+        width: 7px;
+        height: 7px;
+        flex: 0 0 auto;
+        border-radius: 50%;
+        background: #c58a22;
+      }
+      #${PANEL_ID}.is-connected .codex-daily-status {
+        background: #2e9d58;
+      }
+      #${PANEL_ID} .codex-daily-share {
+        height: 29px;
+        display: inline-flex;
+        flex: 0 0 auto;
+        align-items: center;
+        gap: 5px;
+        padding: 0 9px;
+        border: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.22));
+        border-radius: 8px;
+        color: var(--color-token-foreground, #202020);
+        background: var(--color-token-background-secondary, rgba(127, 127, 127, 0.08));
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1;
+        white-space: nowrap;
+      }
+      #${PANEL_ID} .codex-daily-share:hover:not(:disabled) {
+        border-color: rgba(74, 144, 226, 0.4);
+        background: rgba(74, 144, 226, 0.12);
+      }
+      #${PANEL_ID} .codex-daily-share:disabled {
+        cursor: wait;
+        opacity: 0.65;
+      }
+      #${PANEL_ID} .codex-daily-share[data-state="success"] {
+        color: #24834a;
+        border-color: rgba(46, 157, 88, 0.35);
+        background: rgba(46, 157, 88, 0.1);
+      }
+      #${PANEL_ID} .codex-daily-share[data-state="error"] {
+        color: #bf3f48;
+        border-color: rgba(191, 63, 72, 0.35);
+        background: rgba(191, 63, 72, 0.1);
+      }
+      #${PANEL_ID} .codex-daily-share svg {
+        width: 14px;
+        height: 14px;
+      }
+      @keyframes codex-daily-token-pulse {
+        0%, 100% { transform: scale(1); }
+        45% { transform: scale(1.035); }
+      }
+      @media (prefers-color-scheme: dark) {
+        #${PANEL_ID} {
+          background: var(--color-token-background, #202020);
+          color: var(--color-token-foreground, #f2f2f2);
+        }
+      }
+    `;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function createRoot() {
+    root = document.createElement("div");
+    root.id = ROOT_ID;
+    root.innerHTML = `
+      <button class="codex-daily-trigger" type="button" aria-expanded="false" aria-label="查看今日 Token 用量">
+        <span class="codex-daily-sigma" aria-hidden="true">Σ</span>
+        <span>今日</span>
+        <span class="codex-daily-total">0</span>
+      </button>
+    `;
+
+    panel = document.createElement("section");
+    panel.id = PANEL_ID;
+    panel.setAttribute("aria-label", "Token 用量明细");
+    panel.innerHTML = `
+        <div class="codex-daily-heading">
+          <span class="codex-daily-title">Token 用量</span>
+          <span class="codex-daily-date-nav">
+            <button class="codex-daily-date-button" type="button" data-action="previous-day" aria-label="查看前一天">‹</button>
+            <input class="codex-daily-date-input" type="date" aria-label="选择统计日期">
+            <button class="codex-daily-date-button" type="button" data-action="next-day" aria-label="查看后一天">›</button>
+          </span>
+        </div>
+        <div class="codex-daily-hero">0</div>
+        <div class="codex-daily-grid">
+          <span class="codex-daily-label">输入 Token</span><span class="codex-daily-value" data-field="input">0</span>
+          <span class="codex-daily-label">输出 Token</span><span class="codex-daily-value" data-field="output">0</span>
+          <span class="codex-daily-label">缓存输入</span><span class="codex-daily-value" data-field="cached">0</span>
+          <span class="codex-daily-label">推理 Token</span><span class="codex-daily-value" data-field="reasoning">0</span>
+          <span class="codex-daily-label">请求次数</span><span class="codex-daily-value" data-field="calls">0</span>
+          <span class="codex-daily-label">最近更新</span><span class="codex-daily-value" data-field="updatedAt">暂无</span>
+        </div>
+        <div class="codex-daily-trend">
+          <div class="codex-daily-trend-head">
+            <span class="codex-daily-trend-title">近 5 日趋势</span>
+            <span class="codex-daily-trend-peak" data-field="trendPeak">峰值 0</span>
+          </div>
+          <svg class="codex-daily-trend-svg" viewBox="0 0 300 82" role="img" aria-label="近 5 日 Token 趋势"></svg>
+          <div class="codex-daily-trend-labels"></div>
+        </div>
+        <div class="codex-daily-foot">
+          <span class="codex-daily-status-wrap">
+            <span class="codex-daily-status" aria-hidden="true"></span>
+            <span class="codex-daily-status-text">等待数据源</span>
+          </span>
+          <button class="codex-daily-share" type="button" data-state="idle" aria-label="复制当前日期的 Token 分享图片">
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
+              <path d="M10 13V3m0 0L6.5 6.5M10 3l3.5 3.5M4 10.5v4A1.5 1.5 0 0 0 5.5 16h9a1.5 1.5 0 0 0 1.5-1.5v-4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span>分享</span>
+          </button>
+        </div>
+    `;
+    document.body.appendChild(panel);
+
+    const trigger = root.querySelector(".codex-daily-trigger");
+    trigger.addEventListener("click", () => {
+      pinnedOpen = !pinnedOpen;
+      if (pinnedOpen) {
+        showPanel();
+      } else if (!root.matches(":hover") && !panel.matches(":hover")) {
+        hidePanel();
+      }
+    });
+    trigger.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        pinnedOpen = false;
+        hidePanel();
+        trigger.blur();
+      }
+    });
+    trigger.addEventListener("focus", showPanel);
+    trigger.addEventListener("blur", schedulePanelClose);
+    root.addEventListener("mouseenter", showPanel);
+    root.addEventListener("mouseleave", schedulePanelClose);
+    panel.addEventListener("mouseenter", cancelPanelClose);
+    panel.addEventListener("mouseleave", schedulePanelClose);
+
+    panel.querySelector('[data-action="previous-day"]').addEventListener("click", () => {
+      selectDate(shiftDateKey(selectedDateKey, -1));
+    });
+    panel.querySelector('[data-action="next-day"]').addEventListener("click", () => {
+      selectDate(shiftDateKey(selectedDateKey, 1));
+    });
+    panel.querySelector(".codex-daily-date-input").addEventListener("change", (event) => {
+      selectDate(event.currentTarget.value);
+    });
+    panel.querySelector(".codex-daily-share").addEventListener("click", handleShareClick);
+  }
+
+  function selectDate(dateKey) {
+    selectedDateKey = clampDateKey(dateKey);
+    render();
+    return aggregateDay(selectedDateKey);
+  }
+
+  async function handleShareClick(event) {
+    const button = event.currentTarget;
+    const label = button.querySelector("span");
+    pinnedOpen = true;
+    showPanel();
+    button.disabled = true;
+    button.dataset.state = "loading";
+    label.textContent = "生成中";
+
+    if (shareFeedbackTimer) window.clearTimeout(shareFeedbackTimer);
+    try {
+      await copyShareImage(selectedDateKey);
+      button.dataset.state = "success";
+      label.textContent = "已复制";
+    } catch (error) {
+      button.dataset.state = "error";
+      label.textContent = "复制失败";
+      console.warn("[codex-daily-token-usage] share failed", error);
+    } finally {
+      button.disabled = false;
+      shareFeedbackTimer = window.setTimeout(() => {
+        if (!button.isConnected) return;
+        button.dataset.state = "idle";
+        label.textContent = "分享";
+      }, 2200);
+    }
+  }
+
+  function positionPanel() {
+    if (!root || !panel) return;
+    const rect = root.getBoundingClientRect();
+    panel.style.top = `${Math.round(rect.bottom + 8)}px`;
+    panel.style.right = `${Math.max(12, Math.round(innerWidth - rect.right))}px`;
+  }
+
+  function cancelPanelClose() {
+    if (closeTimer) {
+      window.clearTimeout(closeTimer);
+      closeTimer = null;
+    }
+  }
+
+  function showPanel() {
+    if (!root || !panel) return;
+    cancelPanelClose();
+    positionPanel();
+    root.classList.add("is-open");
+    root.querySelector(".codex-daily-trigger")?.setAttribute("aria-expanded", "true");
+    panel.classList.add("is-visible");
+  }
+
+  function hidePanel() {
+    if (!root || !panel) return;
+    cancelPanelClose();
+    root.classList.remove("is-open");
+    root.querySelector(".codex-daily-trigger")?.setAttribute("aria-expanded", "false");
+    panel.classList.remove("is-visible");
+  }
+
+  function schedulePanelClose() {
+    cancelPanelClose();
+    closeTimer = window.setTimeout(() => {
+      if (!pinnedOpen && !root?.matches(":hover") && !panel?.matches(":hover")) {
+        hidePanel();
+      }
+    }, 140);
+  }
+
+  function handleDocumentPointerDown(event) {
+    if (!pinnedOpen || root?.contains(event.target) || panel?.contains(event.target)) return;
+    pinnedOpen = false;
+    hidePanel();
+  }
+
+  function findToolbar() {
+    const plusMenu = document.getElementById("codex-plus-menu");
+    if (plusMenu?.parentElement) return plusMenu.parentElement;
+
+    const candidates = Array.from(document.querySelectorAll("button")).filter((button) => {
+      const rect = button.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.top < 60 && rect.right > innerWidth - 360;
+    });
+
+    for (const button of candidates) {
+      let current = button.parentElement;
+      for (let depth = 0; current && depth < 4; depth += 1, current = current.parentElement) {
+        const style = getComputedStyle(current);
+        const rect = current.getBoundingClientRect();
+        if (
+          style.display === "flex" &&
+          rect.height > 20 &&
+          rect.height < 60 &&
+          rect.right > innerWidth - 24 &&
+          current.children.length > 1
+        ) {
+          return current;
+        }
+      }
+    }
+    return null;
+  }
+
+  function mountRoot() {
+    if (!root || destroyed || !document.body) return;
+    const toolbar = findToolbar();
+
+    if (toolbar) {
+      root.classList.remove("codex-daily-floating");
+      if (root.parentElement !== toolbar) toolbar.insertBefore(root, toolbar.firstChild);
+      if (panel?.classList.contains("is-visible")) positionPanel();
+      return;
+    }
+
+    root.classList.add("codex-daily-floating");
+    if (root.parentElement !== document.body) document.body.appendChild(root);
+    if (panel?.classList.contains("is-visible")) positionPanel();
+  }
+
+  function sourceStatusText(snapshot) {
+    if (sourceMode === "external") {
+      return `${snapshot.turns} 个 turn · 复用 Codex Token Usage`;
+    }
+    if (sourceMode === "standalone") {
+      return `${snapshot.turns} 个 turn · 本机累计 · 独立采集`;
+    }
+    return externalSourceAvailable() ? "等待 Codex Token Usage 数据" : "等待数据源，必要时自动采集";
+  }
+
+  function renderPanelTrend(trend) {
+    if (!panel) return;
+    const svg = panel.querySelector(".codex-daily-trend-svg");
+    const labels = panel.querySelector(".codex-daily-trend-labels");
+    const peak = panel.querySelector('[data-field="trendPeak"]');
+    if (peak) peak.textContent = `峰值 ${formatCompact(trend?.maxTotal || 0)}`;
+
+    const points = trendPoints(trend, 300, 82, 8);
+    const line = trendPath(points, true);
+    const baseline = 74;
+    const area =
+      points.length > 0
+        ? `${line} L ${points[points.length - 1].x.toFixed(1)} ${baseline.toFixed(1)} L ${points[0].x.toFixed(1)} ${baseline.toFixed(1)} Z`
+        : "";
+
+    if (svg) {
+      svg.innerHTML = `
+        <defs>
+          <linearGradient id="codex-daily-trend-line-gradient" x1="0" y1="0" x2="300" y2="0" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#3BA7FF"/>
+            <stop offset="1" stop-color="#8D6BFF"/>
+          </linearGradient>
+          <linearGradient id="codex-daily-trend-area-gradient" x1="0" y1="8" x2="0" y2="74" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#3BA7FF" stop-opacity="0.22"/>
+            <stop offset="1" stop-color="#8D6BFF" stop-opacity="0.02"/>
+          </linearGradient>
+        </defs>
+        <path d="M 8 8 H 292 M 8 41 H 292 M 8 74 H 292" fill="none" stroke="currentColor" stroke-opacity="0.12" stroke-width="1"/>
+        ${area ? `<path d="${area}" fill="url(#codex-daily-trend-area-gradient)"/>` : ""}
+        ${line ? `<path d="${line}" fill="none" stroke="url(#codex-daily-trend-line-gradient)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>` : ""}
+        ${points
+          .map(
+            (point) => `
+              <circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="${point.active ? "4.2" : "3.1"}" fill="var(--color-token-background, #fff)" stroke="url(#codex-daily-trend-line-gradient)" stroke-width="2"/>
+            `
+          )
+          .join("")}
+      `;
+    }
+
+    if (labels) {
+      labels.replaceChildren(
+        ...(trend?.items || []).map((item) => {
+          const label = document.createElement("span");
+          label.textContent = item.label;
+          label.title = `${item.dateKey} · ${formatExact(item.total)} Token`;
+          if (item.active) label.classList.add("is-active");
+          return label;
+        })
+      );
+    }
+  }
+
+  function render({ animate = false } = {}) {
+    if (!root) return;
+    const todayKey = getDateKey(Date.now());
+    const todaySnapshot = aggregateDay(todayKey);
+    const snapshot = aggregateDay(selectedDateKey);
+    const totalChanged = lastRenderedTotal >= 0 && todaySnapshot.total !== lastRenderedTotal;
+    lastRenderedTotal = todaySnapshot.total;
+
+    const connected = sourceMode === "external" || sourceMode === "standalone";
+    root.classList.toggle("is-connected", connected);
+    panel?.classList.toggle("is-connected", connected);
+    root.querySelector(".codex-daily-total").textContent = formatCompact(todaySnapshot.total);
+    panel.querySelector(".codex-daily-title").textContent =
+      selectedDateKey === todayKey ? "今日 Token 用量" : "Token 用量";
+    panel.querySelector(".codex-daily-hero").textContent = formatExact(snapshot.total);
+    panel.querySelector('[data-field="input"]').textContent = formatExact(snapshot.input);
+    panel.querySelector('[data-field="output"]').textContent = formatExact(snapshot.output);
+    panel.querySelector('[data-field="cached"]').textContent = formatExact(snapshot.cached);
+    panel.querySelector('[data-field="reasoning"]').textContent = formatExact(snapshot.reasoning);
+    panel.querySelector('[data-field="calls"]').textContent = formatExact(snapshot.calls);
+    panel.querySelector('[data-field="updatedAt"]').textContent = formatTime(snapshot.updatedAt);
+    const dateInput = panel.querySelector(".codex-daily-date-input");
+    dateInput.min = getMinimumDateKey();
+    dateInput.max = todayKey;
+    dateInput.value = selectedDateKey;
+    panel.querySelector('[data-action="previous-day"]').disabled =
+      selectedDateKey <= dateInput.min;
+    panel.querySelector('[data-action="next-day"]').disabled =
+      selectedDateKey >= todayKey;
+    panel.querySelector(".codex-daily-status-text").textContent = sourceStatusText(snapshot);
+    renderPanelTrend(buildTrendData(selectedDateKey));
+
+    if (animate && totalChanged) {
+      root.classList.remove("is-updated");
+      void root.offsetWidth;
+      root.classList.add("is-updated");
+      window.setTimeout(() => root?.classList.remove("is-updated"), 450);
+    }
+  }
+
+  function scheduleMidnightRefresh() {
+    if (midnightTimer) window.clearTimeout(midnightTimer);
+    const next = new Date();
+    next.setHours(24, 0, 1, 0);
+    midnightTimer = window.setTimeout(() => {
+      const wasViewingToday = selectedDateKey === lastDateKey;
+      lastDateKey = getDateKey(Date.now());
+      if (wasViewingToday) selectedDateKey = lastDateKey;
+      pruneState();
+      saveState();
+      render();
+      scheduleMidnightRefresh();
+    }, Math.max(1000, next.getTime() - Date.now()));
+  }
+
+  function refresh() {
+    if (destroyed) return aggregateDay();
+
+    const currentDateKey = getDateKey(Date.now());
+    if (currentDateKey !== lastDateKey) {
+      const wasViewingToday = selectedDateKey === lastDateKey;
+      lastDateKey = currentDateKey;
+      if (wasViewingToday) selectedDateKey = currentDateKey;
+      pruneState();
+      saveState();
+    }
+
+    const changed = syncFromSource();
+    mountRoot();
+    render({ animate: changed });
+    return aggregateDay();
+  }
+
+  function resetToday() {
+    delete state.days[getDateKey(Date.now())];
+    saveState();
+    render();
+    return aggregateDay();
+  }
+
+  function destroy(options = {}) {
+    destroyed = true;
+    if (pollTimer) window.clearInterval(pollTimer);
+    if (midnightTimer) window.clearTimeout(midnightTimer);
+    if (closeTimer) window.clearTimeout(closeTimer);
+    if (shareFeedbackTimer) window.clearTimeout(shareFeedbackTimer);
+    observer?.disconnect();
+    restoreStandaloneCapture();
+    document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
+    window.removeEventListener("resize", positionPanel);
+    root?.remove();
+    panel?.remove();
+    style?.remove();
+    if (options.clearData === true) {
+      try {
+        localStorage.removeItem(STORAGE_KEY);
+      } catch {
+        // localStorage 不可访问时忽略。
+      }
+    }
+    if (window[API_KEY] === api) delete window[API_KEY];
+  }
+
+  const api = {
+    version: VERSION,
+    refresh,
+    getSnapshot: (dateKey = getDateKey(Date.now())) => aggregateDay(clampDateKey(dateKey)),
+    getSelectedDate: () => selectedDateKey,
+    selectDate,
+    createShareBlob,
+    copyShareImage,
+    resetToday,
+    destroy,
+    __test: {
+      normalizeUsage,
+      getDateKey,
+      parseDateKey,
+      shiftDateKey,
+      clampDateKey,
+      getMinimumDateKey,
+      getTurnTimestamp,
+      isUsageTurn,
+      upsertTurn,
+      aggregateDay,
+      formatCompact,
+      buildTrendData,
+      trendPoints,
+      trendPath,
+      buildShareModel,
+      findUsageCandidates,
+      processCapturePayload,
+      syncFromSource,
+      installStandaloneCapture,
+      externalSourceAvailable,
+      getSourceMode: () => sourceMode,
+      isCaptureInstalled: () => captureInstalled,
+      setStartedAt(value) {
+        startedAt = value;
+      },
+      replaceState(nextState) {
+        state = nextState;
+      },
+    },
+  };
+
+  window[API_KEY] = api;
+
+  function start() {
+    if (destroyed) return;
+    installStyle();
+    createRoot();
+    mountRoot();
+    refresh();
+
+    observer = new MutationObserver(() => mountRoot());
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    document.addEventListener("pointerdown", handleDocumentPointerDown, true);
+    window.addEventListener("resize", positionPanel);
+    pollTimer = window.setInterval(refresh, POLL_INTERVAL_MS);
+    scheduleMidnightRefresh();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start, { once: true });
+  } else {
+    start();
+  }
+})();

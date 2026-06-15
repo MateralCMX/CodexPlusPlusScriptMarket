@@ -69,6 +69,24 @@
       "sha256": "03808d22f53da374837227636ebd9f1ba593fe5aba6219e90e636d7ed7c806eb"
     },
     {
+      "id": "codex-daily-token-usage",
+      "name": "Codex Daily Token Usage",
+      "description": "每日 Token 统计，自动复用已有采集，支持 5 日趋势和分享图",
+      "version": "1.3.0",
+      "author": "kts-kris",
+      "tags": [
+        "codex",
+        "tokens",
+        "usage",
+        "daily",
+        "share",
+        "ui"
+      ],
+      "homepage": "",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-daily-token-usage.js",
+      "sha256": "f3b36d22ef38f6d3410fcf9865287a538eeb0d590b637a0f3243a95743bc5aea"
+    },
+    {
       "id": "codex-list-pagebuster",
       "name": "Codex List Pagebuster",
       "description": "补强会话列表",
