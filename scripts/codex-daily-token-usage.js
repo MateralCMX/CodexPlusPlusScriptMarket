@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.4.0
+// @version      1.4.1
 // @description  每日 Token 统计，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.0";
+  const VERSION = "1.4.1";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
@@ -26,7 +26,7 @@
   const EXTERNAL_SOURCE_GRACE_MS = 4000;
   const EXTERNAL_EMPTY_LIMIT = 4;
   const TREND_DAYS = 5;
-  const MODEL_BIND_WINDOW_MS = 180000;
+  const MODEL_BIND_WINDOW_MS = 30 * 60 * 1000;
   const UNKNOWN_MODEL = "Unknown";
   const PRICE_FIELDS = ["input", "cachedInput", "output", "reasoning"];
 
@@ -64,6 +64,7 @@
   let lastObservedModel = "";
   let lastObservedModelAt = 0;
   let lastObservedModelConfidence = "unknown";
+  const modelByConversationKey = new Map();
 
   function toCount(value) {
     const number = Number(value);
@@ -206,6 +207,51 @@
     return candidates.map(normalizeModelName).find(Boolean) || "";
   }
 
+  function normalizeConversationKey(value) {
+    if (typeof value !== "string") return "";
+    const key = value.trim();
+    if (!key || key.length > 160) return "";
+    return key;
+  }
+
+  function conversationKeyVariants(value) {
+    const key = normalizeConversationKey(value);
+    if (!key) return [];
+    const variants = new Set([key]);
+    const slashTail = key.split("/").filter(Boolean).at(-1);
+    if (slashTail) variants.add(slashTail);
+    const colonTail = key.split(":").filter(Boolean).at(-1);
+    if (colonTail) variants.add(colonTail);
+    return Array.from(variants);
+  }
+
+  function extractConversationKey(value) {
+    if (!value || typeof value !== "object") return "";
+    const candidates = [
+      value.conversationId,
+      value.conversation_id,
+      value.threadId,
+      value.thread_id,
+      value.turn?.conversationId,
+      value.turn?.threadId,
+      value.thread?.id,
+      value.params?.conversationId,
+      value.params?.conversation_id,
+      value.params?.threadId,
+      value.params?.thread_id,
+      value.params?.turn?.conversationId,
+      value.params?.turn?.threadId,
+      value.params?.thread?.id,
+      value.request?.conversationId,
+      value.request?.params?.conversationId,
+      value.request?.params?.conversation_id,
+      value.request?.params?.threadId,
+      value.request?.params?.thread_id,
+      value.request?.params?.thread?.id,
+    ];
+    return candidates.map(normalizeConversationKey).find(Boolean) || "";
+  }
+
   function parseMaybeJsonObject(value) {
     if (!value) return null;
     if (typeof value === "object") return value;
@@ -254,18 +300,43 @@
     return "";
   }
 
-  function observeModel(model, confidence = "observed", timestamp = Date.now()) {
+  function rememberConversationModel(conversationKey, model, confidence = "observed", timestamp = Date.now()) {
+    const normalized = normalizeModelName(model);
+    if (!normalized) return false;
+    const updatedAt = Number.isFinite(timestamp) ? timestamp : Date.now();
+    for (const key of conversationKeyVariants(conversationKey)) {
+      modelByConversationKey.set(key, { model: normalized, confidence, updatedAt });
+    }
+    return true;
+  }
+
+  function modelForConversationKey(conversationKey) {
+    for (const key of conversationKeyVariants(conversationKey)) {
+      const entry = modelByConversationKey.get(key);
+      if (entry?.model) return entry;
+    }
+    return null;
+  }
+
+  function observeModel(model, confidence = "observed", timestamp = Date.now(), conversationKey = "") {
     const normalized = normalizeModelName(model);
     if (!normalized) return false;
     lastObservedModel = normalized;
     lastObservedModelAt = Number.isFinite(timestamp) ? timestamp : Date.now();
     lastObservedModelConfidence = confidence;
+    rememberConversationModel(conversationKey, normalized, confidence, lastObservedModelAt);
     return true;
   }
 
   function observeAppModelMessage(message, confidence = "observed") {
     const model = extractModelFromAppMessage(message);
-    return observeModel(model, confidence);
+    const conversationKey = extractConversationKey(message);
+    if (model) return observeModel(model, confidence, Date.now(), conversationKey);
+    const nearby = modelForTimestamp(Date.now());
+    if (conversationKey && nearby) {
+      return rememberConversationModel(conversationKey, nearby, lastObservedModelConfidence || "nearby");
+    }
+    return false;
   }
 
   function modelForTimestamp(timestamp = Date.now()) {
@@ -277,6 +348,8 @@
   function extractTurnModel(turn, timestamp = Date.now()) {
     const direct = extractDirectModel(turn);
     if (direct) return { model: direct, confidence: "observed" };
+    const keyed = modelForConversationKey(extractConversationKey(turn));
+    if (keyed?.model) return { model: keyed.model, confidence: keyed.confidence || "conversation" };
     const nearby = modelForTimestamp(timestamp);
     if (nearby) return { model: nearby, confidence: lastObservedModelConfidence || "nearby" };
     return { model: UNKNOWN_MODEL, confidence: "unknown" };
@@ -484,7 +557,19 @@
       modelConfidence: modelMeta.confidence,
     };
 
-    if (existing && existing.total > candidate.total) return false;
+    if (existing && existing.total > candidate.total) {
+      if (candidate.model !== UNKNOWN_MODEL && (!existing.model || existing.model === UNKNOWN_MODEL)) {
+        day.turns[turn.turnId] = {
+          ...existing,
+          model: candidate.model,
+          modelConfidence: candidate.modelConfidence,
+          updatedAt: Math.max(existing.updatedAt || 0, candidate.updatedAt),
+        };
+        state.days[dateKey] = day;
+        return true;
+      }
+      return false;
+    }
 
     const next = existing
       ? {
@@ -1190,8 +1275,9 @@
     }
     if (typeof payload !== "object") return false;
 
+    const conversationKey = extractConversationKey(payload);
     let observed = observeAppModelMessage(payload);
-    observed = observeModel(extractDirectModel(payload)) || observed;
+    observed = observeModel(extractDirectModel(payload), "observed", Date.now(), conversationKey) || observed;
     const body = parseMaybeJsonObject(payload.body);
     if (body && body !== payload) observed = processModelPayload(body) || observed;
     return observed;
@@ -2517,10 +2603,10 @@
   };
 
   window[API_KEY] = api;
+  installModelCapture();
 
   function start() {
     if (destroyed) return;
-    installModelCapture();
     installStyle();
     createRoot();
     mountRoot();
