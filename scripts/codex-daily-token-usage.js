@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.4.2
+// @version      1.4.3
 // @description  每日 Token 统计，近 5 日滚动存储，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.2";
+  const VERSION = "1.4.3";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
@@ -703,6 +703,7 @@
         input: toCount(summary.input),
         output: toCount(summary.output),
         calls: toCount(summary.calls),
+        cost: Number(summary.cost) || 0,
         active: itemDateKey === endKey,
       });
     }
@@ -1762,6 +1763,7 @@
         font-weight: 550;
       }
       #${PANEL_ID} .codex-daily-trend {
+        position: relative;
         margin-top: 11px;
         padding: 10px 11px 9px;
         border: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.18));
@@ -1803,6 +1805,51 @@
       #${PANEL_ID} .codex-daily-trend-labels span.is-active {
         color: var(--color-token-foreground, #202020);
         font-weight: 650;
+      }
+      #${PANEL_ID} .codex-daily-trend-point {
+        cursor: default;
+        outline: none;
+      }
+      #${PANEL_ID} .codex-daily-trend-point:hover,
+      #${PANEL_ID} .codex-daily-trend-point:focus {
+        filter: drop-shadow(0 0 4px rgba(82, 124, 255, 0.42));
+      }
+      #${PANEL_ID} .codex-daily-trend-tooltip {
+        position: absolute;
+        z-index: 5;
+        width: max-content;
+        min-width: 158px;
+        max-width: 210px;
+        padding: 9px 10px;
+        border: 1px solid color-mix(in srgb, var(--color-token-border, rgba(127, 127, 127, 0.18)) 82%, transparent);
+        border-radius: 11px;
+        background: color-mix(in srgb, var(--color-token-background, #fff) 94%, transparent);
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16);
+        color: var(--color-token-foreground, #202020);
+        font-size: 11px;
+        line-height: 1.35;
+        pointer-events: none;
+        transform: translate(-50%, calc(-100% - 10px));
+      }
+      #${PANEL_ID} .codex-daily-trend-tooltip[hidden] {
+        display: none;
+      }
+      #${PANEL_ID} .codex-daily-trend-tooltip-date {
+        margin-bottom: 6px;
+        font-weight: 700;
+      }
+      #${PANEL_ID} .codex-daily-trend-tooltip-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        margin-top: 3px;
+        color: var(--color-token-foreground-secondary, #737373);
+      }
+      #${PANEL_ID} .codex-daily-trend-tooltip-row strong {
+        color: var(--color-token-foreground, #202020);
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
       }
       #${PANEL_ID} .codex-daily-models,
       #${PANEL_ID} .codex-daily-price-panel {
@@ -2083,6 +2130,7 @@
           </div>
           <svg class="codex-daily-trend-svg" viewBox="0 0 300 82" role="img" aria-label="近 5 日 Token 趋势"></svg>
           <div class="codex-daily-trend-labels"></div>
+          <div class="codex-daily-trend-tooltip" hidden></div>
         </div>
         <div class="codex-daily-models">
           <div class="codex-daily-section-head">
@@ -2432,11 +2480,56 @@
     return externalSourceAvailable() ? "等待 Codex Token Usage 数据" : "等待数据源，必要时自动采集";
   }
 
+  function trendTooltipHtml(point) {
+    return `
+      <div class="codex-daily-trend-tooltip-date">${escapeHtml(formatDisplayDate(point.dateKey))}</div>
+      <div class="codex-daily-trend-tooltip-row">
+        <span>Token 总量</span>
+        <strong>${formatExact(point.total)}</strong>
+      </div>
+      <div class="codex-daily-trend-tooltip-row">
+        <span>请求次数</span>
+        <strong>${formatExact(point.calls)}</strong>
+      </div>
+      <div class="codex-daily-trend-tooltip-row">
+        <span>预估金额</span>
+        <strong>${formatCost(point.cost)}</strong>
+      </div>
+    `;
+  }
+
+  function hideTrendTooltip() {
+    const tooltip = panel?.querySelector(".codex-daily-trend-tooltip");
+    if (tooltip) tooltip.hidden = true;
+  }
+
+  function showTrendTooltip(point, target) {
+    if (!panel || !point || !target) return;
+    const trendBox = panel.querySelector(".codex-daily-trend");
+    const tooltip = panel.querySelector(".codex-daily-trend-tooltip");
+    const svg = panel.querySelector(".codex-daily-trend-svg");
+    if (!trendBox || !tooltip || !svg) return;
+
+    tooltip.innerHTML = trendTooltipHtml(point);
+    tooltip.hidden = false;
+
+    const boxRect = trendBox.getBoundingClientRect();
+    const svgRect = svg.getBoundingClientRect();
+    const tooltipRect = tooltip.getBoundingClientRect();
+    const x = svgRect.left - boxRect.left + (point.x / 300) * svgRect.width;
+    const y = svgRect.top - boxRect.top + (point.y / 82) * svgRect.height;
+    const minX = tooltipRect.width / 2 + 8;
+    const maxX = Math.max(minX, boxRect.width - tooltipRect.width / 2 - 8);
+    tooltip.style.left = `${Math.min(Math.max(x, minX), maxX)}px`;
+    tooltip.style.top = `${Math.max(y, tooltipRect.height + 18)}px`;
+  }
+
   function renderPanelTrend(trend) {
     if (!panel) return;
     const svg = panel.querySelector(".codex-daily-trend-svg");
     const labels = panel.querySelector(".codex-daily-trend-labels");
     const peak = panel.querySelector('[data-field="trendPeak"]');
+    hideTrendTooltip();
     if (peak) peak.textContent = `峰值 ${formatCompact(trend?.maxTotal || 0)}`;
 
     const points = trendPoints(trend, 300, 82, 8);
@@ -2464,12 +2557,20 @@
         ${line ? `<path d="${line}" fill="none" stroke="url(#codex-daily-trend-line-gradient)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>` : ""}
         ${points
           .map(
-            (point) => `
-              <circle cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="${point.active ? "4.2" : "3.1"}" fill="var(--color-token-background, #fff)" stroke="url(#codex-daily-trend-line-gradient)" stroke-width="2"/>
+            (point, index) => `
+              <circle class="codex-daily-trend-point" data-index="${index}" tabindex="0" aria-label="${escapeAttribute(`${point.dateKey}，Token 总量 ${formatExact(point.total)}，请求次数 ${formatExact(point.calls)}，预估金额 ${formatCost(point.cost)}`)}" cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="${point.active ? "4.2" : "3.1"}" fill="var(--color-token-background, #fff)" stroke="url(#codex-daily-trend-line-gradient)" stroke-width="2"/>
             `
           )
           .join("")}
       `;
+      svg.querySelectorAll(".codex-daily-trend-point").forEach((circle) => {
+        const point = points[Number(circle.getAttribute("data-index"))];
+        circle.addEventListener("pointerenter", () => showTrendTooltip(point, circle));
+        circle.addEventListener("pointermove", () => showTrendTooltip(point, circle));
+        circle.addEventListener("focus", () => showTrendTooltip(point, circle));
+        circle.addEventListener("pointerleave", hideTrendTooltip);
+        circle.addEventListener("blur", hideTrendTooltip);
+      });
     }
 
     if (labels) {
