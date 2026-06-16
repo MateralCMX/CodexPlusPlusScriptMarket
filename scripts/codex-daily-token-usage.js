@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.4.1
-// @description  每日 Token 统计，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
+// @version      1.4.2
+// @description  每日 Token 统计，近 5 日滚动存储，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
 // ==/UserScript==
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.1";
+  const VERSION = "1.4.2";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
@@ -19,7 +19,7 @@
   const PANEL_ID = "codex-daily-token-usage-panel";
   const STYLE_ID = "codex-daily-token-usage-style";
   const POLL_INTERVAL_MS = 1000;
-  const RETAIN_DAYS = 365;
+  const RETAIN_DAYS = 5;
   const MAX_TURNS_PER_DAY = 2000;
   const CAPTURE_DEDUPE_WINDOW_MS = 3000;
   const MAX_CAPTURE_BODY_CHARS = 2_000_000;
@@ -60,6 +60,7 @@
   let lastDateKey = getDateKey(Date.now());
   let selectedDateKey = lastDateKey;
   let state = loadState();
+  if (pruneState()) saveState();
   let priceConfig = loadPriceConfig();
   let lastObservedModel = "";
   let lastObservedModelAt = 0;
@@ -527,12 +528,15 @@
     cutoff.setHours(0, 0, 0, 0);
     cutoff.setDate(cutoff.getDate() - RETAIN_DAYS + 1);
 
+    let changed = false;
     for (const key of Object.keys(state.days)) {
       const timestamp = Date.parse(`${key}T00:00:00`);
       if (!Number.isFinite(timestamp) || timestamp < cutoff.getTime()) {
         delete state.days[key];
+        changed = true;
       }
     }
+    return changed;
   }
 
   function upsertTurn(turn) {
@@ -1677,33 +1681,68 @@
         line-height: 23px;
         color-scheme: light dark;
       }
+      #${PANEL_ID} .codex-daily-summary {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 12px;
+        margin: 2px 0 12px;
+      }
+      #${PANEL_ID} .codex-daily-total-block {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+      #${PANEL_ID} .codex-daily-total-label {
+        margin-bottom: 4px;
+        color: var(--color-token-foreground-secondary, #737373);
+        font-size: 11px;
+        font-weight: 600;
+      }
       #${PANEL_ID} .codex-daily-hero {
-        margin-bottom: 12px;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
         font-size: 26px;
         line-height: 1.1;
-        font-weight: 700;
+        font-weight: 750;
         font-variant-numeric: tabular-nums;
+        letter-spacing: -0.03em;
       }
       #${PANEL_ID} .codex-daily-cost {
+        flex: 0 0 auto;
+        min-width: 124px;
         display: flex;
         align-items: baseline;
         justify-content: space-between;
         gap: 10px;
-        margin: -4px 0 12px;
-        padding: 9px 10px;
-        border: 1px solid rgba(74, 144, 226, 0.2);
-        border-radius: 10px;
-        background: rgba(74, 144, 226, 0.08);
+        padding: 10px 11px;
+        border: 1px solid rgba(74, 144, 226, 0.22);
+        border-radius: 12px;
+        background: rgba(74, 144, 226, 0.1);
       }
       #${PANEL_ID} .codex-daily-cost-label {
         color: var(--color-token-foreground-secondary, #737373);
         font-size: 11px;
+        font-weight: 600;
+        white-space: nowrap;
       }
       #${PANEL_ID} .codex-daily-cost-value {
         color: #2f7dd1;
         font-size: 15px;
         font-weight: 750;
         font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      @media (max-width: 360px) {
+        #${PANEL_ID} .codex-daily-summary {
+          align-items: stretch;
+          flex-direction: column;
+        }
+        #${PANEL_ID} .codex-daily-cost {
+          width: 100%;
+          box-sizing: border-box;
+        }
       }
       #${PANEL_ID} .codex-daily-grid {
         display: grid;
@@ -2019,10 +2058,15 @@
             </span>
           </span>
         </div>
-        <div class="codex-daily-hero">0</div>
-        <div class="codex-daily-cost">
-          <span class="codex-daily-cost-label">估算金额</span>
-          <span class="codex-daily-cost-value" data-field="cost">$0.0000</span>
+        <div class="codex-daily-summary">
+          <div class="codex-daily-total-block">
+            <div class="codex-daily-total-label">累计 Token</div>
+            <div class="codex-daily-hero">0</div>
+          </div>
+          <div class="codex-daily-cost">
+            <span class="codex-daily-cost-label">估算金额</span>
+            <span class="codex-daily-cost-value" data-field="cost">$0.0000</span>
+          </div>
         </div>
         <div class="codex-daily-grid">
           <span class="codex-daily-label">输入 Token</span><span class="codex-daily-value" data-field="input">0</span>
@@ -2576,6 +2620,7 @@
       shiftDateKey,
       clampDateKey,
       getMinimumDateKey,
+      pruneState,
       getTurnTimestamp,
       isUsageTurn,
       upsertTurn,
@@ -2595,6 +2640,9 @@
       isCaptureInstalled: () => captureInstalled,
       setStartedAt(value) {
         startedAt = value;
+      },
+      getRawState() {
+        return JSON.parse(JSON.stringify(state));
       },
       replaceState(nextState) {
         state = nextState;
