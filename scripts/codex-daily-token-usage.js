@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.3.0
-// @description  每日 Token 统计，优先复用已有采集，必要时内置采集，支持日期切换、5 日趋势与分享图。
+// @version      1.4.0
+// @description  每日 Token 统计，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
 // ==/UserScript==
@@ -10,10 +10,11 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.3.0";
+  const VERSION = "1.4.0";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
+  const PRICE_STORAGE_KEY = "__codexDailyTokenUsageModelPricesV1";
   const ROOT_ID = "codex-daily-token-usage";
   const PANEL_ID = "codex-daily-token-usage-panel";
   const STYLE_ID = "codex-daily-token-usage-style";
@@ -25,6 +26,9 @@
   const EXTERNAL_SOURCE_GRACE_MS = 4000;
   const EXTERNAL_EMPTY_LIMIT = 4;
   const TREND_DAYS = 5;
+  const MODEL_BIND_WINDOW_MS = 180000;
+  const UNKNOWN_MODEL = "Unknown";
+  const PRICE_FIELDS = ["input", "cachedInput", "output", "reasoning"];
 
   const previous = window[API_KEY];
   if (previous && typeof previous.destroy === "function") {
@@ -47,6 +51,7 @@
   let destroyed = false;
   let sourceMode = "waiting";
   let captureInstalled = false;
+  let modelCaptureInstalled = false;
   let lastCaptureAt = 0;
   let captureSeq = 0;
   let externalEmptyCount = 0;
@@ -55,6 +60,10 @@
   let lastDateKey = getDateKey(Date.now());
   let selectedDateKey = lastDateKey;
   let state = loadState();
+  let priceConfig = loadPriceConfig();
+  let lastObservedModel = "";
+  let lastObservedModelAt = 0;
+  let lastObservedModelConfidence = "unknown";
 
   function toCount(value) {
     const number = Number(value);
@@ -161,6 +170,118 @@
     return { input, output, cached, reasoning, total };
   }
 
+  function normalizeModelName(value) {
+    if (typeof value !== "string") return "";
+    const model = value.trim();
+    if (!model || model.length > 120) return "";
+    if (/^(null|undefined|default)$/i.test(model)) return "";
+    return model;
+  }
+
+  function displayModelName(model) {
+    return normalizeModelName(model) || UNKNOWN_MODEL;
+  }
+
+  function extractDirectModel(value) {
+    if (!value || typeof value !== "object") return "";
+    const candidates = [
+      value.model,
+      value.modelId,
+      value.model_id,
+      value.toModel,
+      value.threadSettings?.model,
+      value.settings?.model,
+      value.collaborationMode?.settings?.model,
+      value.params?.model,
+      value.params?.threadSettings?.model,
+      value.params?.settings?.model,
+      value.params?.collaborationMode?.settings?.model,
+      value.request?.params?.model,
+      value.request?.params?.threadSettings?.model,
+      value.request?.params?.collaborationMode?.settings?.model,
+      value.body?.model,
+      value.body?.threadSettings?.model,
+      value.body?.collaborationMode?.settings?.model,
+    ];
+    return candidates.map(normalizeModelName).find(Boolean) || "";
+  }
+
+  function parseMaybeJsonObject(value) {
+    if (!value) return null;
+    if (typeof value === "object") return value;
+    if (typeof value !== "string") return null;
+    return safeParseJson(value);
+  }
+
+  function extractModelFromAppMessage(message) {
+    if (!message || typeof message !== "object") return "";
+    const type = String(message.type || "");
+    const method = String(message.method || message.request?.method || "");
+    const params = message.params || message.request?.params || null;
+    const body = parseMaybeJsonObject(message.body);
+
+    if (type === "mcp-request" || type === "thread-prewarm-start") {
+      return extractDirectModel({ method, params, request: message.request });
+    }
+    if (
+      type === "start-conversation" ||
+      type === "start-turn-for-host" ||
+      type === "update-thread-settings-for-next-turn" ||
+      type === "thread-follower-update-thread-settings-for-host" ||
+      type === "thread-follower-start-turn-for-host" ||
+      type === "send-cli-request-for-host" ||
+      type === "prewarm-thread-start-for-host"
+    ) {
+      return extractDirectModel(message);
+    }
+    if (type === "fetch" || type === "fetch-stream") {
+      const url = String(message.url || "");
+      if (/vscode:\/\/codex\/(start-conversation|start-turn-for-host|update-thread-settings|send-cli-request|prewarm-thread-start)/.test(url)) {
+        return extractDirectModel(body || message);
+      }
+      return "";
+    }
+    if (type === "mcp-notification") {
+      if (method === "thread/settings/updated") return extractDirectModel(params?.threadSettings || params);
+      if (method === "model/rerouted") return normalizeModelName(params?.toModel) || extractDirectModel(params);
+      if (method === "thread/started") return extractDirectModel(params?.thread || params);
+      if (method === "turn/started") return extractDirectModel(params?.turn || params);
+    }
+    if (type === "thread/settings/updated") return extractDirectModel(message.threadSettings || message);
+    if (type === "model/rerouted") return normalizeModelName(message.toModel) || extractDirectModel(message);
+    if (type === "thread/started") return extractDirectModel(message.thread || message);
+    if (type === "turn/started") return extractDirectModel(message.turn || message);
+    return "";
+  }
+
+  function observeModel(model, confidence = "observed", timestamp = Date.now()) {
+    const normalized = normalizeModelName(model);
+    if (!normalized) return false;
+    lastObservedModel = normalized;
+    lastObservedModelAt = Number.isFinite(timestamp) ? timestamp : Date.now();
+    lastObservedModelConfidence = confidence;
+    return true;
+  }
+
+  function observeAppModelMessage(message, confidence = "observed") {
+    const model = extractModelFromAppMessage(message);
+    return observeModel(model, confidence);
+  }
+
+  function modelForTimestamp(timestamp = Date.now()) {
+    if (!lastObservedModel || !lastObservedModelAt) return "";
+    const time = Number.isFinite(timestamp) ? timestamp : Date.now();
+    return Math.abs(time - lastObservedModelAt) <= MODEL_BIND_WINDOW_MS ? lastObservedModel : "";
+  }
+
+  function extractTurnModel(turn, timestamp = Date.now()) {
+    const direct = extractDirectModel(turn);
+    if (direct) return { model: direct, confidence: "observed" };
+    const nearby = modelForTimestamp(timestamp);
+    if (nearby) return { model: nearby, confidence: lastObservedModelConfidence || "nearby" };
+    return { model: UNKNOWN_MODEL, confidence: "unknown" };
+  }
+
   function isUsageTurn(turn) {
     if (!turn || typeof turn !== "object" || !turn.turnId) return false;
     const usage = normalizeUsage(turn.usage);
@@ -192,6 +313,142 @@
     }
   }
 
+  function createEmptyPriceConfig() {
+    return { version: 1, currency: "USD", models: {} };
+  }
+
+  function normalizePriceNumber(value, allowNull = true) {
+    if (value === "" || value == null) return allowNull ? null : 0;
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return allowNull ? null : 0;
+    return Number(number.toFixed(6));
+  }
+
+  function normalizePriceEntry(entry) {
+    const source = entry && typeof entry === "object" ? entry : {};
+    return {
+      input: normalizePriceNumber(source.input),
+      cachedInput: normalizePriceNumber(source.cachedInput),
+      output: normalizePriceNumber(source.output),
+      reasoning: normalizePriceNumber(source.reasoning),
+    };
+  }
+
+  function isPriceEntryEmpty(entry) {
+    const normalized = normalizePriceEntry(entry);
+    return PRICE_FIELDS.every((field) => normalized[field] == null);
+  }
+
+  function loadPriceConfig() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(PRICE_STORAGE_KEY) || "null");
+      if (parsed?.version === 1 && parsed.models && typeof parsed.models === "object") {
+        const models = {};
+        for (const [model, entry] of Object.entries(parsed.models)) {
+          const normalizedModel = normalizeModelName(model);
+          if (!normalizedModel) continue;
+          const normalizedEntry = normalizePriceEntry(entry);
+          if (!isPriceEntryEmpty(normalizedEntry)) models[normalizedModel] = normalizedEntry;
+        }
+        return { version: 1, currency: "USD", models };
+      }
+    } catch {
+      // 价格配置损坏时回到空配置，避免影响主统计。
+    }
+    return createEmptyPriceConfig();
+  }
+
+  function savePriceConfig() {
+    try {
+      localStorage.setItem(PRICE_STORAGE_KEY, JSON.stringify(priceConfig));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function getModelPrice(model) {
+    const normalized = normalizeModelName(model);
+    return normalized ? priceConfig.models[normalized] || null : null;
+  }
+
+  function setModelPrice(model, entry) {
+    const normalized = normalizeModelName(model);
+    if (!normalized) return false;
+    const next = normalizePriceEntry(entry);
+    if (isPriceEntryEmpty(next)) delete priceConfig.models[normalized];
+    else priceConfig.models[normalized] = next;
+    savePriceConfig();
+    render();
+    return true;
+  }
+
+  function updateModelPriceField(model, field, value) {
+    if (!PRICE_FIELDS.includes(field)) return false;
+    const normalized = normalizeModelName(model);
+    if (!normalized) return false;
+    const current = normalizePriceEntry(priceConfig.models[normalized]);
+    current[field] = normalizePriceNumber(value);
+    if (isPriceEntryEmpty(current)) delete priceConfig.models[normalized];
+    else priceConfig.models[normalized] = current;
+    savePriceConfig();
+    refreshPriceDependentDisplays();
+    return true;
+  }
+
+  function clearModelPrice(model) {
+    const normalized = normalizeModelName(model);
+    if (!normalized) return false;
+    delete priceConfig.models[normalized];
+    savePriceConfig();
+    render();
+    return true;
+  }
+
+  function calculateUsageCost(usage, price) {
+    const entry = normalizePriceEntry(price);
+    const configured = PRICE_FIELDS.some((field) => entry[field] != null);
+    if (!configured) return { cost: 0, configured: false };
+
+    const input = toCount(usage?.input);
+    const cached = Math.min(input, toCount(usage?.cached));
+    const output = toCount(usage?.output);
+    const reasoning = Math.min(output, toCount(usage?.reasoning));
+    const inputRate = entry.input ?? 0;
+    const cachedRate = entry.cachedInput ?? inputRate;
+    const outputRate = entry.output ?? 0;
+    const reasoningRate = entry.reasoning ?? outputRate;
+    const billableInput = Math.max(0, input - cached);
+    const visibleOutput = Math.max(0, output - reasoning);
+    const cost =
+      (billableInput * inputRate +
+        cached * cachedRate +
+        visibleOutput * outputRate +
+        reasoning * reasoningRate) /
+      1_000_000;
+    return { cost, configured: true };
+  }
+
+  function formatCost(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return "$0.0000";
+    const digits = number >= 1 ? 2 : number >= 0.01 ? 4 : 6;
+    return `$${number.toFixed(digits)}`;
+  }
+
+  function formatPriceInputValue(value) {
+    const number = normalizePriceNumber(value);
+    return number == null ? "" : String(number);
+  }
+
+  function refreshPriceDependentDisplays() {
+    if (!panel) return;
+    const snapshot = aggregateDay(selectedDateKey);
+    const cost = panel.querySelector('[data-field="cost"]');
+    if (cost) cost.textContent = formatCost(snapshot.cost);
+    renderModelBreakdown(snapshot);
+  }
+
   function pruneState(now = Date.now()) {
     const cutoff = new Date(now);
     cutoff.setHours(0, 0, 0, 0);
@@ -211,6 +468,7 @@
     const timestamp = getTurnTimestamp(turn);
     const dateKey = getDateKey(timestamp);
     const usage = normalizeUsage(turn.usage);
+    const modelMeta = extractTurnModel(turn, timestamp);
     const day = state.days[dateKey] || { turns: {}, updatedAt: 0 };
     const existing = day.turns[turn.turnId];
     const candidate = {
@@ -222,6 +480,8 @@
       calls: Math.max(1, toCount(turn.callCount)),
       updatedAt: timestamp,
       source: String(turn.source || "turn-aggregate"),
+      model: modelMeta.model,
+      modelConfidence: modelMeta.confidence,
     };
 
     if (existing && existing.total > candidate.total) return false;
@@ -236,6 +496,14 @@
           calls: Math.max(existing.calls || 0, candidate.calls),
           updatedAt: Math.max(existing.updatedAt || 0, candidate.updatedAt),
           source: candidate.source,
+          model:
+            candidate.model !== UNKNOWN_MODEL || !existing.model || existing.model === UNKNOWN_MODEL
+              ? candidate.model
+              : existing.model,
+          modelConfidence:
+            candidate.model !== UNKNOWN_MODEL || !existing.model || existing.model === UNKNOWN_MODEL
+              ? candidate.modelConfidence
+              : existing.modelConfidence || "unknown",
         }
       : candidate;
 
@@ -258,7 +526,7 @@
 
   function aggregateDay(dateKey = getDateKey(Date.now())) {
     const turns = Object.values(state.days[dateKey]?.turns || {});
-    return turns.reduce(
+    const summary = turns.reduce(
       (summary, turn) => {
         summary.input += toCount(turn.input);
         summary.output += toCount(turn.output);
@@ -268,6 +536,30 @@
         summary.calls += Math.max(1, toCount(turn.calls));
         summary.turns += 1;
         summary.updatedAt = Math.max(summary.updatedAt, toCount(turn.updatedAt));
+        const model = displayModelName(turn.model);
+        let modelSummary = summary.modelsByName[model];
+        if (!modelSummary) {
+          modelSummary = {
+            model,
+            input: 0,
+            output: 0,
+            cached: 0,
+            reasoning: 0,
+            total: 0,
+            calls: 0,
+            turns: 0,
+            cost: 0,
+            priced: false,
+          };
+          summary.modelsByName[model] = modelSummary;
+        }
+        modelSummary.input += toCount(turn.input);
+        modelSummary.output += toCount(turn.output);
+        modelSummary.cached += toCount(turn.cached);
+        modelSummary.reasoning += toCount(turn.reasoning);
+        modelSummary.total += toCount(turn.total);
+        modelSummary.calls += Math.max(1, toCount(turn.calls));
+        modelSummary.turns += 1;
         return summary;
       },
       {
@@ -280,8 +572,26 @@
         calls: 0,
         turns: 0,
         updatedAt: 0,
+        cost: 0,
+        pricedModels: 0,
+        modelsByName: {},
+        models: [],
       }
     );
+    summary.models = Object.values(summary.modelsByName)
+      .map((modelSummary) => {
+        const costInfo = calculateUsageCost(modelSummary, getModelPrice(modelSummary.model));
+        summary.cost += costInfo.cost;
+        if (costInfo.configured) summary.pricedModels += 1;
+        return {
+          ...modelSummary,
+          cost: costInfo.cost,
+          priced: costInfo.configured,
+        };
+      })
+      .sort((a, b) => b.total - a.total || a.model.localeCompare(b.model));
+    delete summary.modelsByName;
+    return summary;
   }
 
   function formatTrendDateLabel(dateKey) {
@@ -393,6 +703,8 @@
       total,
       calls: toCount(snapshot?.calls),
       turns: toCount(snapshot?.turns),
+      cost: Number(snapshot?.cost) || 0,
+      models: Array.isArray(snapshot?.models) ? snapshot.models.slice(0, 4) : [],
       cacheRate: input > 0 ? Math.min(100, (cached / input) * 100) : 0,
       outputRate: total > 0 ? Math.min(100, (output / total) * 100) : 0,
       trend: buildTrendData(snapshot?.dateKey || getDateKey(Date.now())),
@@ -579,6 +891,11 @@
     context.fillStyle = "rgba(226, 232, 255, 0.48)";
     context.font = '500 21px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
     context.fillText(`${formatExact(model.turns)} 个 turn  ·  ${formatExact(model.calls)} 次请求`, 73, 350);
+    context.textAlign = "right";
+    context.fillStyle = "rgba(114, 195, 255, 0.78)";
+    context.font = '650 22px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+    context.fillText(`估算成本 ${formatCost(model.cost)}`, 1129, 350);
+    context.textAlign = "left";
 
     const cardWidth = 250;
     const gap = 22;
@@ -620,7 +937,11 @@
 
     context.fillStyle = "rgba(226, 232, 255, 0.46)";
     context.font = '500 19px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
-    context.fillText("数据仅来自本机 Codex++，不包含会话内容", 72, 833);
+    const modelText = model.models.length
+      ? `主力 Model：${model.models.map((item) => item.model).join(" / ")}`
+      : "Model：暂无可识别数据";
+    context.fillText(modelText.slice(0, 72), 72, 809);
+    context.fillText("数据仅来自本机 Codex++，成本为本地配置价格估算，不包含会话内容", 72, 833);
     context.textAlign = "right";
     context.fillStyle = "rgba(114, 195, 255, 0.72)";
     context.font = '650 19px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif';
@@ -734,17 +1055,18 @@
     return usage;
   }
 
-  function findUsageCandidates(value, depth = 0, inheritedId = "") {
+  function findUsageCandidates(value, depth = 0, inheritedId = "", inheritedModel = "") {
     if (!value || depth > 8) return [];
     if (typeof value === "string") {
-      return parseTextPayloads(value).flatMap((item) => findUsageCandidates(item, depth + 1, inheritedId));
+      return parseTextPayloads(value).flatMap((item) => findUsageCandidates(item, depth + 1, inheritedId, inheritedModel));
     }
     if (Array.isArray(value)) {
-      return value.flatMap((item) => findUsageCandidates(item, depth + 1, inheritedId));
+      return value.flatMap((item) => findUsageCandidates(item, depth + 1, inheritedId, inheritedModel));
     }
     if (typeof value !== "object") return [];
 
     const id = extractCandidateId(value) || inheritedId;
+    const model = extractDirectModel(value) || inheritedModel;
     const candidates = [];
     const directKeys = [
       "usage",
@@ -758,11 +1080,11 @@
 
     for (const key of directKeys) {
       const usage = normalizeCaptureUsage(value[key]);
-      if (usage) candidates.push({ usage, id });
+      if (usage) candidates.push({ usage, id, model });
     }
 
     const selfUsage = normalizeCaptureUsage(value);
-    if (selfUsage) candidates.push({ usage: selfUsage, id });
+    if (selfUsage) candidates.push({ usage: selfUsage, id, model });
 
     for (const key of [
       "response",
@@ -778,7 +1100,7 @@
       "output",
       "details",
     ]) {
-      candidates.push(...findUsageCandidates(value[key], depth + 1, id));
+      candidates.push(...findUsageCandidates(value[key], depth + 1, id, model));
     }
 
     return dedupeCandidates(candidates);
@@ -819,6 +1141,7 @@
       : `${now}-${++captureSeq}`;
     const changed = upsertTurn({
       turnId,
+      model: candidate.model,
       source: `capture:${source}`,
       callCount: 1,
       createdAt: new Date(now).toISOString(),
@@ -842,6 +1165,7 @@
 
   function processCapturePayload(payload, source, url = "") {
     if (sourceMode === "external") return false;
+    processModelPayload(payload);
     const candidates = findUsageCandidates(payload);
     if (!candidates.length) return false;
     let changed = false;
@@ -856,11 +1180,57 @@
     return changed;
   }
 
+  function processModelPayload(payload) {
+    if (!payload) return false;
+    if (typeof payload === "string") {
+      return parseTextPayloads(payload).some((item) => processModelPayload(item));
+    }
+    if (Array.isArray(payload)) {
+      return payload.some((item) => processModelPayload(item));
+    }
+    if (typeof payload !== "object") return false;
+
+    let observed = observeAppModelMessage(payload);
+    observed = observeModel(extractDirectModel(payload)) || observed;
+    const body = parseMaybeJsonObject(payload.body);
+    if (body && body !== payload) observed = processModelPayload(body) || observed;
+    return observed;
+  }
+
+  function installModelCapture() {
+    if (modelCaptureInstalled) return false;
+    window.addEventListener?.(
+      "codex-message-from-view",
+      (event) => {
+        try {
+          processModelPayload(event.detail);
+        } catch {
+          // 不影响 Codex 自身消息投递。
+        }
+      },
+      true
+    );
+    window.addEventListener?.(
+      "message",
+      (event) => {
+        try {
+          processModelPayload(event.data);
+        } catch {
+          // Ignore unrelated messages.
+        }
+      },
+      true
+    );
+    modelCaptureInstalled = true;
+    return true;
+  }
+
   function installFetchCapture() {
     if (typeof window.fetch !== "function" || window.fetch.__codexDailyTokenUsageWrapped === VERSION) return;
     const originalFetch = window.fetch;
     async function wrappedFetch(input, init) {
       const url = requestUrl(input);
+      processModelPayload(init?.body);
       const response = await originalFetch.call(this, input, init);
       const contentType = String(response?.headers?.get?.("content-type") || "");
       if (response?.clone && (isLikelyUsageUrl(url) || /json|event-stream|text/.test(contentType))) {
@@ -887,6 +1257,7 @@
       return originalOpen.call(this, method, url, ...rest);
     };
     Xhr.prototype.send = function send(...args) {
+      processModelPayload(args[0]);
       this.addEventListener?.("loadend", () => {
         const url = this.__codexDailyTokenUsageUrl || "";
         if (!isLikelyUsageUrl(url) && !String(this.getResponseHeader?.("content-type") || "").match(/json|event-stream|text/)) {
@@ -943,6 +1314,7 @@
       "message",
       (event) => {
         try {
+          processModelPayload(event.data);
           processCapturePayload(event.data, "post-message");
         } catch {
           // Ignore unrelated messages.
@@ -1147,6 +1519,31 @@
         font-size: 13px;
         font-weight: 650;
       }
+      #${PANEL_ID} .codex-daily-head-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      #${PANEL_ID} .codex-daily-price-toggle {
+        height: 29px;
+        display: inline-flex;
+        align-items: center;
+        padding: 0 8px;
+        border: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.2));
+        border-radius: 8px;
+        color: var(--color-token-foreground-secondary, #737373);
+        background: var(--color-token-background-secondary, rgba(127, 127, 127, 0.07));
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+        font-weight: 600;
+      }
+      #${PANEL_ID} .codex-daily-price-toggle:hover,
+      #${PANEL_ID} .codex-daily-price-toggle[aria-expanded="true"] {
+        color: var(--color-token-foreground, #202020);
+        border-color: rgba(74, 144, 226, 0.38);
+        background: rgba(74, 144, 226, 0.11);
+      }
       #${PANEL_ID} .codex-daily-date-nav {
         display: inline-flex;
         align-items: center;
@@ -1199,6 +1596,27 @@
         font-size: 26px;
         line-height: 1.1;
         font-weight: 700;
+        font-variant-numeric: tabular-nums;
+      }
+      #${PANEL_ID} .codex-daily-cost {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        margin: -4px 0 12px;
+        padding: 9px 10px;
+        border: 1px solid rgba(74, 144, 226, 0.2);
+        border-radius: 10px;
+        background: rgba(74, 144, 226, 0.08);
+      }
+      #${PANEL_ID} .codex-daily-cost-label {
+        color: var(--color-token-foreground-secondary, #737373);
+        font-size: 11px;
+      }
+      #${PANEL_ID} .codex-daily-cost-value {
+        color: #2f7dd1;
+        font-size: 15px;
+        font-weight: 750;
         font-variant-numeric: tabular-nums;
       }
       #${PANEL_ID} .codex-daily-grid {
@@ -1260,6 +1678,149 @@
       #${PANEL_ID} .codex-daily-trend-labels span.is-active {
         color: var(--color-token-foreground, #202020);
         font-weight: 650;
+      }
+      #${PANEL_ID} .codex-daily-models,
+      #${PANEL_ID} .codex-daily-price-panel {
+        margin-top: 11px;
+        padding: 10px 11px;
+        border: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.18));
+        border-radius: 10px;
+        background: var(--color-token-background-secondary, rgba(127, 127, 127, 0.055));
+      }
+      #${PANEL_ID} .codex-daily-section-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin-bottom: 8px;
+        font-size: 11px;
+      }
+      #${PANEL_ID} .codex-daily-section-title {
+        font-weight: 650;
+      }
+      #${PANEL_ID} .codex-daily-section-meta {
+        color: var(--color-token-foreground-secondary, #737373);
+        font-variant-numeric: tabular-nums;
+      }
+      #${PANEL_ID} .codex-daily-model-list {
+        display: grid;
+        gap: 7px;
+      }
+      #${PANEL_ID} .codex-daily-model-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 4px 10px;
+        align-items: center;
+        font-size: 11px;
+      }
+      #${PANEL_ID} .codex-daily-model-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 600;
+      }
+      #${PANEL_ID} .codex-daily-model-cost {
+        color: var(--color-token-foreground, #202020);
+        font-weight: 650;
+        font-variant-numeric: tabular-nums;
+      }
+      #${PANEL_ID} .codex-daily-model-bar {
+        grid-column: 1 / -1;
+        height: 5px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: rgba(127, 127, 127, 0.14);
+      }
+      #${PANEL_ID} .codex-daily-model-fill {
+        display: block;
+        height: 100%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, #3BA7FF, #8D6BFF);
+      }
+      #${PANEL_ID} .codex-daily-price-panel[hidden] {
+        display: none;
+      }
+      #${PANEL_ID} .codex-daily-price-help {
+        margin-bottom: 9px;
+        color: var(--color-token-foreground-secondary, #737373);
+        font-size: 10.5px;
+        line-height: 1.45;
+      }
+      #${PANEL_ID} .codex-daily-price-add {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 6px;
+        margin-bottom: 9px;
+      }
+      #${PANEL_ID} .codex-daily-price-model-input,
+      #${PANEL_ID} .codex-daily-price-input {
+        box-sizing: border-box;
+        min-width: 0;
+        height: 27px;
+        padding: 0 7px;
+        border: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.2));
+        border-radius: 7px;
+        color: var(--color-token-foreground, #202020);
+        background: var(--color-token-background, #fff);
+        font: inherit;
+        font-size: 11px;
+        outline: none;
+      }
+      #${PANEL_ID} .codex-daily-price-input {
+        width: 100%;
+        font-variant-numeric: tabular-nums;
+      }
+      #${PANEL_ID} .codex-daily-price-add-button,
+      #${PANEL_ID} .codex-daily-price-clear {
+        height: 27px;
+        padding: 0 8px;
+        border: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.2));
+        border-radius: 7px;
+        color: var(--color-token-foreground, #202020);
+        background: var(--color-token-background-secondary, rgba(127, 127, 127, 0.08));
+        cursor: pointer;
+        font: inherit;
+        font-size: 11px;
+        font-weight: 600;
+      }
+      #${PANEL_ID} .codex-daily-price-list {
+        display: grid;
+        gap: 9px;
+        max-height: 260px;
+        overflow: auto;
+        padding-right: 2px;
+      }
+      #${PANEL_ID} .codex-daily-price-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 6px;
+        padding-bottom: 9px;
+        border-bottom: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.13));
+      }
+      #${PANEL_ID} .codex-daily-price-row:last-child {
+        padding-bottom: 0;
+        border-bottom: 0;
+      }
+      #${PANEL_ID} .codex-daily-price-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 11px;
+        font-weight: 650;
+      }
+      #${PANEL_ID} .codex-daily-price-grid {
+        grid-column: 1 / -1;
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 6px;
+      }
+      #${PANEL_ID} .codex-daily-price-field {
+        display: grid;
+        gap: 3px;
+        color: var(--color-token-foreground-secondary, #737373);
+        font-size: 10px;
       }
       #${PANEL_ID} .codex-daily-foot {
         display: flex;
@@ -1363,13 +1924,20 @@
     panel.innerHTML = `
         <div class="codex-daily-heading">
           <span class="codex-daily-title">Token 用量</span>
-          <span class="codex-daily-date-nav">
-            <button class="codex-daily-date-button" type="button" data-action="previous-day" aria-label="查看前一天">‹</button>
-            <input class="codex-daily-date-input" type="date" aria-label="选择统计日期">
-            <button class="codex-daily-date-button" type="button" data-action="next-day" aria-label="查看后一天">›</button>
+          <span class="codex-daily-head-actions">
+            <button class="codex-daily-price-toggle" type="button" data-action="toggle-prices" aria-expanded="false">价格</button>
+            <span class="codex-daily-date-nav">
+              <button class="codex-daily-date-button" type="button" data-action="previous-day" aria-label="查看前一天">‹</button>
+              <input class="codex-daily-date-input" type="date" aria-label="选择统计日期">
+              <button class="codex-daily-date-button" type="button" data-action="next-day" aria-label="查看后一天">›</button>
+            </span>
           </span>
         </div>
         <div class="codex-daily-hero">0</div>
+        <div class="codex-daily-cost">
+          <span class="codex-daily-cost-label">估算金额</span>
+          <span class="codex-daily-cost-value" data-field="cost">$0.0000</span>
+        </div>
         <div class="codex-daily-grid">
           <span class="codex-daily-label">输入 Token</span><span class="codex-daily-value" data-field="input">0</span>
           <span class="codex-daily-label">输出 Token</span><span class="codex-daily-value" data-field="output">0</span>
@@ -1385,6 +1953,25 @@
           </div>
           <svg class="codex-daily-trend-svg" viewBox="0 0 300 82" role="img" aria-label="近 5 日 Token 趋势"></svg>
           <div class="codex-daily-trend-labels"></div>
+        </div>
+        <div class="codex-daily-models">
+          <div class="codex-daily-section-head">
+            <span class="codex-daily-section-title">按 Model 分布</span>
+            <span class="codex-daily-section-meta" data-field="modelMeta">暂无定价</span>
+          </div>
+          <div class="codex-daily-model-list"></div>
+        </div>
+        <div class="codex-daily-price-panel" hidden>
+          <div class="codex-daily-section-head">
+            <span class="codex-daily-section-title">Model 价格设置</span>
+            <span class="codex-daily-section-meta">USD / 1M tokens</span>
+          </div>
+          <div class="codex-daily-price-help">缓存输入留空按输入价计算；推理 Token 留空按输出价计算。价格只用于本地估算，不代表官方账单。</div>
+          <div class="codex-daily-price-add">
+            <input class="codex-daily-price-model-input" type="text" placeholder="添加 Model，例如 gpt-5.5" aria-label="添加 Model 名称">
+            <button class="codex-daily-price-add-button" type="button" data-action="add-price-model">添加</button>
+          </div>
+          <div class="codex-daily-price-list"></div>
         </div>
         <div class="codex-daily-foot">
           <span class="codex-daily-status-wrap">
@@ -1430,10 +2017,155 @@
     panel.querySelector('[data-action="next-day"]').addEventListener("click", () => {
       selectDate(shiftDateKey(selectedDateKey, 1));
     });
+    panel.querySelector('[data-action="toggle-prices"]').addEventListener("click", togglePricePanel);
+    panel.querySelector('[data-action="add-price-model"]').addEventListener("click", addPriceModelFromInput);
     panel.querySelector(".codex-daily-date-input").addEventListener("change", (event) => {
       selectDate(event.currentTarget.value);
     });
+    panel.querySelector(".codex-daily-price-model-input").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") addPriceModelFromInput();
+    });
+    panel.querySelector(".codex-daily-price-list").addEventListener("input", handlePriceInput);
+    panel.querySelector(".codex-daily-price-list").addEventListener("click", handlePriceListClick);
     panel.querySelector(".codex-daily-share").addEventListener("click", handleShareClick);
+  }
+
+  function togglePricePanel() {
+    if (!panel) return;
+    const pricePanel = panel.querySelector(".codex-daily-price-panel");
+    const toggle = panel.querySelector('[data-action="toggle-prices"]');
+    const nextOpen = pricePanel?.hidden !== false;
+    if (pricePanel) pricePanel.hidden = !nextOpen;
+    toggle?.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+    if (nextOpen) renderPriceSettings(aggregateDay(selectedDateKey));
+    positionPanel();
+  }
+
+  function addPriceModelFromInput() {
+    if (!panel) return;
+    const input = panel.querySelector(".codex-daily-price-model-input");
+    const model = normalizeModelName(input?.value || "");
+    if (!model) return;
+    if (!priceConfig.models[model]) {
+      priceConfig.models[model] = normalizePriceEntry({});
+      savePriceConfig();
+    }
+    if (input) input.value = "";
+    render();
+    const pricePanel = panel.querySelector(".codex-daily-price-panel");
+    if (pricePanel) pricePanel.hidden = false;
+    panel.querySelector('[data-action="toggle-prices"]')?.setAttribute("aria-expanded", "true");
+  }
+
+  function handlePriceInput(event) {
+    const target = event.target;
+    if (!target?.classList?.contains("codex-daily-price-input")) return;
+    updateModelPriceField(target.dataset.model || "", target.dataset.field || "", target.value);
+  }
+
+  function handlePriceListClick(event) {
+    const button = event.target?.closest?.("[data-action='clear-price-model']");
+    if (!button) return;
+    clearModelPrice(button.dataset.model || "");
+  }
+
+  function knownModels(snapshot = aggregateDay(selectedDateKey)) {
+    const models = new Set([
+      ...Object.keys(priceConfig.models || {}),
+      ...(snapshot.models || []).map((item) => item.model),
+      lastObservedModel,
+    ]);
+    models.delete("");
+    return Array.from(models).sort((a, b) => {
+      const aTotal = snapshot.models?.find((item) => item.model === a)?.total || 0;
+      const bTotal = snapshot.models?.find((item) => item.model === b)?.total || 0;
+      return bTotal - aTotal || a.localeCompare(b);
+    });
+  }
+
+  function renderModelBreakdown(snapshot) {
+    if (!panel) return;
+    const list = panel.querySelector(".codex-daily-model-list");
+    const meta = panel.querySelector('[data-field="modelMeta"]');
+    if (meta) {
+      const pricedText = snapshot.pricedModels > 0 ? `${snapshot.pricedModels} 个 Model 已定价` : "暂无定价";
+      meta.textContent = `${formatCost(snapshot.cost)} · ${pricedText}`;
+    }
+    if (!list) return;
+    const models = snapshot.models?.length
+      ? snapshot.models
+      : [{ model: UNKNOWN_MODEL, total: 0, cost: 0, priced: false }];
+    const maxTotal = Math.max(1, ...models.map((item) => toCount(item.total)));
+    list.replaceChildren(
+      ...models.slice(0, 6).map((item) => {
+        const row = document.createElement("div");
+        row.className = "codex-daily-model-row";
+        const percent = Math.max(4, Math.min(100, (toCount(item.total) / maxTotal) * 100));
+        row.innerHTML = `
+          <span class="codex-daily-model-name" title="${escapeHtml(item.model)}">${escapeHtml(item.model)}</span>
+          <span class="codex-daily-model-cost">${item.priced ? formatCost(item.cost) : "未定价"}</span>
+          <span class="codex-daily-model-bar" title="${formatExact(item.total)} Token">
+            <span class="codex-daily-model-fill" style="width: ${percent.toFixed(1)}%"></span>
+          </span>
+        `;
+        return row;
+      })
+    );
+  }
+
+  function renderPriceSettings(snapshot) {
+    if (!panel) return;
+    const list = panel.querySelector(".codex-daily-price-list");
+    if (!list) return;
+    const models = knownModels(snapshot);
+    if (!models.length) {
+      const empty = document.createElement("div");
+      empty.className = "codex-daily-price-help";
+      empty.textContent = "还没有识别到 Model。可以手动添加 Model 名称后配置价格。";
+      list.replaceChildren(empty);
+      return;
+    }
+    list.replaceChildren(
+      ...models.map((model) => {
+        const entry = normalizePriceEntry(priceConfig.models[model]);
+        const row = document.createElement("div");
+        row.className = "codex-daily-price-row";
+        row.innerHTML = `
+          <span class="codex-daily-price-name" title="${escapeHtml(model)}">${escapeHtml(model)}</span>
+          <button class="codex-daily-price-clear" type="button" data-action="clear-price-model" data-model="${escapeAttribute(model)}">清除</button>
+          <div class="codex-daily-price-grid">
+            ${priceInputHtml(model, "input", "输入", entry.input)}
+            ${priceInputHtml(model, "cachedInput", "缓存", entry.cachedInput)}
+            ${priceInputHtml(model, "output", "输出", entry.output)}
+            ${priceInputHtml(model, "reasoning", "推理", entry.reasoning)}
+          </div>
+        `;
+        return row;
+      })
+    );
+  }
+
+  function priceInputHtml(model, field, label, value) {
+    return `
+      <label class="codex-daily-price-field">
+        <span>${label}</span>
+        <input class="codex-daily-price-input" type="number" min="0" step="0.000001" inputmode="decimal"
+          data-model="${escapeAttribute(model)}" data-field="${field}" value="${escapeAttribute(formatPriceInputValue(value))}">
+      </label>
+    `;
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
+  function escapeAttribute(value) {
+    return escapeHtml(value);
   }
 
   function selectDate(dateKey) {
@@ -1638,6 +2370,7 @@
     panel.querySelector(".codex-daily-title").textContent =
       selectedDateKey === todayKey ? "今日 Token 用量" : "Token 用量";
     panel.querySelector(".codex-daily-hero").textContent = formatExact(snapshot.total);
+    panel.querySelector('[data-field="cost"]').textContent = formatCost(snapshot.cost);
     panel.querySelector('[data-field="input"]').textContent = formatExact(snapshot.input);
     panel.querySelector('[data-field="output"]').textContent = formatExact(snapshot.output);
     panel.querySelector('[data-field="cached"]').textContent = formatExact(snapshot.cached);
@@ -1654,6 +2387,10 @@
       selectedDateKey >= todayKey;
     panel.querySelector(".codex-daily-status-text").textContent = sourceStatusText(snapshot);
     renderPanelTrend(buildTrendData(selectedDateKey));
+    renderModelBreakdown(snapshot);
+    if (panel.querySelector(".codex-daily-price-panel")?.hidden === false) {
+      renderPriceSettings(snapshot);
+    }
 
     if (animate && totalChanged) {
       root.classList.remove("is-updated");
@@ -1719,6 +2456,7 @@
     if (options.clearData === true) {
       try {
         localStorage.removeItem(STORAGE_KEY);
+        localStorage.removeItem(PRICE_STORAGE_KEY);
       } catch {
         // localStorage 不可访问时忽略。
       }
@@ -1734,10 +2472,19 @@
     selectDate,
     createShareBlob,
     copyShareImage,
+    getModelPrices: () => JSON.parse(JSON.stringify(priceConfig.models)),
+    setModelPrice,
+    clearModelPrice,
     resetToday,
     destroy,
     __test: {
       normalizeUsage,
+      normalizeModelName,
+      extractDirectModel,
+      extractModelFromAppMessage,
+      observeAppModelMessage,
+      calculateUsageCost,
+      formatCost,
       getDateKey,
       parseDateKey,
       shiftDateKey,
@@ -1754,6 +2501,7 @@
       buildShareModel,
       findUsageCandidates,
       processCapturePayload,
+      processModelPayload,
       syncFromSource,
       installStandaloneCapture,
       externalSourceAvailable,
@@ -1772,6 +2520,7 @@
 
   function start() {
     if (destroyed) return;
+    installModelCapture();
     installStyle();
     createRoot();
     mountRoot();
