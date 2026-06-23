@@ -2191,6 +2191,12 @@
         trigger.blur();
       }
     });
+    trigger.addEventListener("focus", showPanel);
+    trigger.addEventListener("blur", schedulePanelClose);
+    trigger.addEventListener("mouseenter", showPanel);
+    trigger.addEventListener("mouseleave", schedulePanelClose);
+    panel.addEventListener("mouseenter", cancelPanelClose);
+    panel.addEventListener("mouseleave", schedulePanelClose);
     panel.querySelector('[data-action="previous-day"]').addEventListener("click", () => {
       selectDate(shiftDateKey(selectedDateKey, -1));
     });
@@ -2427,7 +2433,9 @@
   function schedulePanelClose() {
     cancelPanelClose();
     closeTimer = window.setTimeout(() => {
-      if (!pinnedOpen && !root?.matches(":hover") && !panel?.matches(":hover")) {
+      const trigger = root?.querySelector(".codex-daily-trigger");
+      const triggerActive = trigger?.matches(":hover") || trigger?.matches(":focus");
+      if (!pinnedOpen && !triggerActive && !panel?.matches(":hover")) {
         hidePanel();
       }
     }, 140);
