@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.4.3
+// @version      1.4.4
 // @description  每日 Token 统计，近 5 日滚动存储，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.3";
+  const VERSION = "1.4.4";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
@@ -29,6 +29,11 @@
   const MODEL_BIND_WINDOW_MS = 30 * 60 * 1000;
   const UNKNOWN_MODEL = "Unknown";
   const PRICE_FIELDS = ["input", "cachedInput", "output", "reasoning"];
+  const FLOATING_TOP = 2;
+  const FLOATING_RIGHT = 280;
+  const PANEL_GAP = 8;
+  const PANEL_MARGIN = 12;
+  const WINDOW_BUTTON_SAFE_RIGHT = 132;
 
   const previous = window[API_KEY];
   if (previous && typeof previous.destroy === "function") {
@@ -1514,15 +1519,17 @@
         display: flex;
         flex: 0 0 auto;
         align-items: center;
-        pointer-events: auto;
+        pointer-events: none;
         -webkit-app-region: no-drag;
         z-index: 2147483600;
         font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
       #${ROOT_ID}.codex-daily-floating {
         position: fixed;
-        top: 10px;
-        right: 80px;
+        top: ${FLOATING_TOP}px;
+        right: ${FLOATING_RIGHT}px;
+        bottom: auto;
+        left: auto;
       }
       #${ROOT_ID} .codex-daily-trigger {
         box-sizing: border-box;
@@ -1546,6 +1553,7 @@
         user-select: none;
         outline: none;
         transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+        pointer-events: auto;
         -webkit-app-region: no-drag;
       }
       #${ROOT_ID} .codex-daily-trigger:hover,
@@ -2167,11 +2175,12 @@
     document.body.appendChild(panel);
 
     const trigger = root.querySelector(".codex-daily-trigger");
-    trigger.addEventListener("click", () => {
+    trigger.addEventListener("click", (event) => {
+      event.stopPropagation();
       pinnedOpen = !pinnedOpen;
       if (pinnedOpen) {
         showPanel();
-      } else if (!root.matches(":hover") && !panel.matches(":hover")) {
+      } else {
         hidePanel();
       }
     });
@@ -2182,13 +2191,6 @@
         trigger.blur();
       }
     });
-    trigger.addEventListener("focus", showPanel);
-    trigger.addEventListener("blur", schedulePanelClose);
-    root.addEventListener("mouseenter", showPanel);
-    root.addEventListener("mouseleave", schedulePanelClose);
-    panel.addEventListener("mouseenter", cancelPanelClose);
-    panel.addEventListener("mouseleave", schedulePanelClose);
-
     panel.querySelector('[data-action="previous-day"]').addEventListener("click", () => {
       selectDate(shiftDateKey(selectedDateKey, -1));
     });
@@ -2383,8 +2385,19 @@
   function positionPanel() {
     if (!root || !panel) return;
     const rect = root.getBoundingClientRect();
-    panel.style.top = `${Math.round(rect.bottom + 8)}px`;
-    panel.style.right = `${Math.max(12, Math.round(innerWidth - rect.right))}px`;
+    const panelRect = panel.getBoundingClientRect();
+    const panelWidth = panelRect.width || Math.min(350, innerWidth - PANEL_MARGIN * 2);
+    const panelHeight = panelRect.height || 580;
+    const maxLeft = Math.max(PANEL_MARGIN, innerWidth - panelWidth - PANEL_MARGIN);
+    const safeMaxLeft = Math.max(PANEL_MARGIN, innerWidth - panelWidth - WINDOW_BUTTON_SAFE_RIGHT);
+    const preferredLeft = rect.left;
+    const left = Math.min(Math.max(PANEL_MARGIN, preferredLeft), safeMaxLeft, maxLeft);
+    const preferredTop = rect.bottom + PANEL_GAP;
+    const maxTop = Math.max(PANEL_MARGIN, innerHeight - panelHeight - PANEL_MARGIN);
+    const top = Math.min(Math.max(PANEL_MARGIN, preferredTop), maxTop);
+    panel.style.top = `${Math.round(top)}px`;
+    panel.style.left = `${Math.round(left)}px`;
+    panel.style.right = "auto";
   }
 
   function cancelPanelClose() {
@@ -2427,12 +2440,16 @@
   }
 
   function findToolbar() {
+    return null;
+
     const plusMenu = document.getElementById("codex-plus-menu");
-    if (plusMenu?.parentElement) return plusMenu.parentElement;
+    if (plusMenu?.parentElement && plusMenu.getBoundingClientRect().top >= 30) {
+      return plusMenu.parentElement;
+    }
 
     const candidates = Array.from(document.querySelectorAll("button")).filter((button) => {
       const rect = button.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.top < 60 && rect.right > innerWidth - 360;
+      return rect.width > 0 && rect.height > 0 && rect.top >= 30 && rect.top < 72 && rect.right > innerWidth - 360;
     });
 
     for (const button of candidates) {
@@ -2444,7 +2461,7 @@
           style.display === "flex" &&
           rect.height > 20 &&
           rect.height < 60 &&
-          rect.right > innerWidth - 24 &&
+          rect.right > innerWidth - WINDOW_BUTTON_SAFE_RIGHT &&
           current.children.length > 1
         ) {
           return current;
@@ -2466,7 +2483,14 @@
     }
 
     root.classList.add("codex-daily-floating");
-    if (root.parentElement !== document.body) document.body.appendChild(root);
+    if (root.parentElement !== document.body) {
+      document.body.appendChild(root);
+    }
+    root.style.top = `${FLOATING_TOP}px`;
+    root.style.right = `${FLOATING_RIGHT}px`;
+    root.style.left = "auto";
+    root.style.bottom = "auto";
+    root.style.transform = "none";
     if (panel?.classList.contains("is-visible")) positionPanel();
   }
 
