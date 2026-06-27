@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.4.4
+// @version      1.4.5
 // @description  每日 Token 统计，近 5 日滚动存储，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.4";
+  const VERSION = "1.4.5";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
@@ -23,7 +23,6 @@
   const MAX_TURNS_PER_DAY = 2000;
   const CAPTURE_DEDUPE_WINDOW_MS = 3000;
   const MAX_CAPTURE_BODY_CHARS = 2_000_000;
-  const EXTERNAL_SOURCE_GRACE_MS = 4000;
   const EXTERNAL_EMPTY_LIMIT = 4;
   const TREND_DAYS = 5;
   const MODEL_BIND_WINDOW_MS = 30 * 60 * 1000;
@@ -60,7 +59,6 @@
   let lastCaptureAt = 0;
   let captureSeq = 0;
   let externalEmptyCount = 0;
-  let startedAt = Date.now();
   let lastRenderedTotal = -1;
   let lastDateKey = getDateKey(Date.now());
   let selectedDateKey = lastDateKey;
@@ -145,32 +143,47 @@
     const usage = rawUsage && typeof rawUsage === "object" ? rawUsage : {};
     const input = firstCount(
       usage.inputTotalTokens,
+      usage.input_total_tokens,
+      usage.promptTotalTokens,
+      usage.prompt_total_tokens,
       usage.inputTokens,
       usage.input_tokens,
+      usage.promptTokens,
       usage.prompt_tokens
     );
     const output = firstCount(
       usage.outputTotalTokens,
       usage.outputTokens,
       usage.output_tokens,
+      usage.completionTokens,
       usage.completion_tokens
     );
     const cached = firstCount(
       usage.cachedReadTokens,
       usage.cachedTokens,
       usage.cacheReadTokens,
+      usage.cachedInputTokens,
       usage.cached_input_tokens,
+      usage.cacheReadInputTokens,
+      usage.cache_read_input_tokens,
+      usage.promptTokensDetails?.cachedTokens,
+      usage.prompt_tokens_details?.cached_tokens,
+      usage.inputTokensDetails?.cachedTokens,
       usage.input_tokens_details?.cached_tokens
     );
     const reasoning = firstCount(
       usage.reasoningTokens,
       usage.reasoning_tokens,
+      usage.outputTokensDetails?.reasoningTokens,
       usage.output_tokens_details?.reasoning_tokens
     );
     const total = firstCount(
       usage.requestTotalTokens,
       usage.totalTokens,
       usage.total_tokens,
+      usage.usedTokens,
+      usage.used_tokens,
+      usage.used,
       input + output
     );
 
@@ -1167,6 +1180,8 @@
       "usage",
       "token_usage",
       "tokenUsage",
+      "context_usage",
+      "contextUsage",
       "last_usage",
       "lastUsage",
       "last_token_usage",
@@ -1194,6 +1209,7 @@
       "item",
       "output",
       "details",
+      "info",
     ]) {
       candidates.push(...findUsageCandidates(value[key], depth + 1, id, model));
     }
@@ -1275,6 +1291,10 @@
     return changed;
   }
 
+  function shouldProcessStandalonePayload() {
+    return sourceMode !== "external" && (captureInstalled || !externalSourceAvailable());
+  }
+
   function processModelPayload(payload) {
     if (!payload) return false;
     if (typeof payload === "string") {
@@ -1299,7 +1319,11 @@
       "codex-message-from-view",
       (event) => {
         try {
-          processModelPayload(event.detail);
+          if (shouldProcessStandalonePayload()) {
+            processCapturePayload(event.detail, "codex-message");
+          } else {
+            processModelPayload(event.detail);
+          }
         } catch {
           // 不影响 Codex 自身消息投递。
         }
@@ -1469,7 +1493,7 @@
   function shouldInstallStandaloneCapture(externalTurns) {
     if (captureInstalled) return false;
     if (!externalSourceAvailable()) {
-      return Date.now() - startedAt >= EXTERNAL_SOURCE_GRACE_MS;
+      return true;
     }
     if (externalTurns.length > 0) return false;
     externalEmptyCount += 1;
@@ -2191,6 +2215,12 @@
         trigger.blur();
       }
     });
+    trigger.addEventListener("focus", showPanel);
+    trigger.addEventListener("blur", schedulePanelClose);
+    trigger.addEventListener("mouseenter", showPanel);
+    trigger.addEventListener("mouseleave", schedulePanelClose);
+    panel.addEventListener("mouseenter", cancelPanelClose);
+    panel.addEventListener("mouseleave", schedulePanelClose);
     panel.querySelector('[data-action="previous-day"]').addEventListener("click", () => {
       selectDate(shiftDateKey(selectedDateKey, -1));
     });
@@ -2427,7 +2457,9 @@
   function schedulePanelClose() {
     cancelPanelClose();
     closeTimer = window.setTimeout(() => {
-      if (!pinnedOpen && !root?.matches(":hover") && !panel?.matches(":hover")) {
+      const trigger = root?.querySelector(".codex-daily-trigger");
+      const triggerActive = trigger?.matches(":hover") || trigger?.matches(":focus");
+      if (!pinnedOpen && !triggerActive && !panel?.matches(":hover")) {
         hidePanel();
       }
     }, 140);
@@ -2763,9 +2795,6 @@
       externalSourceAvailable,
       getSourceMode: () => sourceMode,
       isCaptureInstalled: () => captureInstalled,
-      setStartedAt(value) {
-        startedAt = value;
-      },
       getRawState() {
         return JSON.parse(JSON.stringify(state));
       },
