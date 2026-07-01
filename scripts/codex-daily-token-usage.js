@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.4.6
+// @version      1.4.7
 // @description  每日 Token 统计，近 5 日滚动存储，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.6";
+  const VERSION = "1.4.7";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
@@ -18,6 +18,10 @@
   const ROOT_ID = "codex-daily-token-usage";
   const PANEL_ID = "codex-daily-token-usage-panel";
   const STYLE_ID = "codex-daily-token-usage-style";
+  const CODEX_PLUS_MENU_ID = "codex-plus-menu";
+  const APP_HEADER_SELECTOR = ".app-header-tint";
+  const HEADER_TOOLBAR_CLUSTER_SELECTOR = ".ms-auto.flex.shrink-0.items-center";
+  const HEADER_TOOLBAR_CLASS_SELECTOR = '[class*="ms-auto"][class*="shrink-0"][class*="items-center"]';
   const POLL_INTERVAL_MS = 1000;
   const RETAIN_DAYS = 5;
   const MAX_TURNS_PER_DAY = 2000;
@@ -134,14 +138,65 @@
     return dateKey < minimumKey ? minimumKey : dateKey > todayKey ? todayKey : dateKey;
   }
 
+  function parseTimestamp(value) {
+    if (value == null || value === "") return null;
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) return null;
+      if (value > 1_500_000_000_000) return value;
+      if (value > 1_500_000_000) return value * 1000;
+      return null;
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      if (/^\d+(?:\.\d+)?$/.test(trimmed)) return parseTimestamp(Number(trimmed));
+      const parsed = Date.parse(trimmed);
+      return Number.isFinite(parsed) && parsed > 1_500_000_000_000 ? parsed : null;
+    }
+    return null;
+  }
+
+  function latestNestedTimestamp(items) {
+    if (!Array.isArray(items)) return null;
+    let latest = null;
+    for (const item of items) {
+      const timestamp = parseTimestamp(
+        item?.observedAt ??
+          item?.observed_at ??
+          item?.createdAt ??
+          item?.created_at ??
+          item?.updatedAt ??
+          item?.updated_at ??
+          item?.timestamp
+      );
+      if (timestamp && (!latest || timestamp > latest)) latest = timestamp;
+    }
+    return latest;
+  }
+
   function getTurnTimestamp(turn) {
-    const encoded = Number.parseInt(String(turn?.turnId || "").split("-")[0], 10);
-    if (Number.isFinite(encoded) && encoded > 1_500_000_000_000) return encoded;
+    const encoded = parseTimestamp(String(turn?.turnId || "").split("-")[0]);
+    if (encoded) return encoded;
 
-    const createdAt = Date.parse(turn?.createdAt || "");
-    if (Number.isFinite(createdAt)) return createdAt;
+    const idEncoded = parseTimestamp(String(turn?.id || "").split("-")[0]);
+    if (idEncoded) return idEncoded;
 
-    return Date.now();
+    const direct = parseTimestamp(
+      turn?.createdAt ??
+        turn?.created_at ??
+        turn?.observedAt ??
+        turn?.observed_at ??
+        turn?.updatedAt ??
+        turn?.updated_at ??
+        turn?.startedAt ??
+        turn?.started_at ??
+        turn?.lastUpdatedAt ??
+        turn?.last_updated_at ??
+        turn?.timestamp
+    );
+    if (direct) return direct;
+
+    return latestNestedTimestamp(turn?.calls) || latestNestedTimestamp(turn?.ledgerEvents);
   }
 
   function normalizeUsage(rawUsage) {
@@ -566,6 +621,7 @@
     if (!isUsageTurn(turn)) return false;
 
     const timestamp = getTurnTimestamp(turn);
+    if (!timestamp) return false;
     const dateKey = getDateKey(timestamp);
     const usage = normalizeUsage(turn.usage);
     const modelMeta = extractTurnModel(turn, timestamp);
@@ -2513,15 +2569,27 @@
     return { left, right: left + width, top, bottom: top + height, width, height };
   }
 
-  function resolveFloatingLayout(width, height, viewportWidth, viewportHeight, obstacleRects = []) {
+  function normalizeFloatingAnchor(anchor) {
+    const rect = normalizeRect(anchor?.rect || anchor);
+    if (!rect) return null;
+    return {
+      rect,
+      gap: Math.max(FLOATING_SAFE_GAP, Number(anchor?.gap) || 0),
+    };
+  }
+
+  function resolveFloatingLayout(width, height, viewportWidth, viewportHeight, obstacleRects = [], preferredAnchors = []) {
     const safeWidth = Math.min(Math.max(1, Number(width) || FLOATING_MIN_WIDTH), Math.max(1, viewportWidth - PANEL_MARGIN * 2));
     const compactWidth = Math.min(FLOATING_COMPACT_WIDTH, safeWidth);
     const safeHeight = Math.max(1, Number(height) || FLOATING_HEIGHT);
+    const safeViewportHeight = Math.max(safeHeight, Number(viewportHeight) || safeHeight);
     const top = FLOATING_TOP;
     const maxRight = Math.max(PANEL_MARGIN, viewportWidth - PANEL_MARGIN - safeWidth);
     const clampRight = (right) => Math.min(Math.max(PANEL_MARGIN, right), maxRight);
-    const layoutFromLeft = (left, width, compact = false) => ({
-      top,
+    const maxTop = Math.max(0, safeViewportHeight - safeHeight - PANEL_MARGIN);
+    const clampTop = (value) => Math.min(Math.max(0, value), maxTop);
+    const layoutFromLeft = (left, width, compact = false, layoutTop = top) => ({
+      top: layoutTop,
       right: viewportWidth - left - width,
       left,
       width,
@@ -2530,6 +2598,23 @@
     const topObstacles = obstacleRects
       .map(normalizeRect)
       .filter((rect) => rect && rect.bottom > 0 && rect.top < FLOATING_SCAN_TOP && rect.right > 0 && rect.left < viewportWidth);
+    const candidateFits = (candidate) =>
+      candidate.left >= PANEL_MARGIN &&
+      candidate.right <= viewportWidth - PANEL_MARGIN &&
+      candidate.top >= 0 &&
+      candidate.bottom <= safeViewportHeight;
+    const candidateIsClear = (candidate) =>
+      candidateFits(candidate) && !topObstacles.some((rect) => rectsOverlap(candidate, rect, FLOATING_SAFE_GAP));
+
+    for (const anchor of preferredAnchors.map(normalizeFloatingAnchor).filter(Boolean)) {
+      const layoutTop = clampTop(anchor.rect.top + (anchor.rect.height - safeHeight) / 2);
+      const layoutRight = viewportWidth - anchor.rect.left + anchor.gap;
+      const candidate = candidateRectFromRight(layoutRight, layoutTop, safeWidth, safeHeight, viewportWidth);
+      if (candidateIsClear(candidate)) {
+        return layoutFromLeft(candidate.left, safeWidth, false, layoutTop);
+      }
+    }
+
     const defaultRight = clampRight(FLOATING_DEFAULT_RIGHT);
     const defaultRect = candidateRectFromRight(defaultRight, top, safeWidth, safeHeight, viewportWidth);
     if (!topObstacles.some((rect) => rectsOverlap(defaultRect, rect, FLOATING_SAFE_GAP))) {
@@ -2571,7 +2656,7 @@
 
   function collectTopObstacleRects() {
     if (!document.body?.querySelectorAll) return [];
-    const selector = "button,[role='button'],input,select,textarea,#codex-plus-menu,[data-testid]";
+    const selector = `button,[role='button'],input,select,textarea,#${CODEX_PLUS_MENU_ID},[data-testid]`;
     return Array.from(document.body.querySelectorAll(selector))
       .filter((node) => !root?.contains(node) && !panel?.contains(node))
       .map((node) => {
@@ -2586,10 +2671,70 @@
       .filter(Boolean);
   }
 
+  function numericCssValue(value) {
+    const parsed = Number.parseFloat(value || "");
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  function visibleTopRect(node) {
+    const rect = normalizeRect(node?.getBoundingClientRect?.());
+    if (!rect || rect.width < 4 || rect.height < 4) return null;
+    if (rect.top >= FLOATING_SCAN_TOP || rect.bottom <= 0) return null;
+    const style = typeof getComputedStyle === "function" ? getComputedStyle(node) : null;
+    if (style && (style.display === "none" || style.visibility === "hidden" || style.opacity === "0")) return null;
+    return rect;
+  }
+
+  function headerTitleRegion(header) {
+    const candidates = Array.from(header?.querySelectorAll?.('[data-state], [class*="truncate"], [class*="text-base"]') || []);
+    return (
+      candidates.find((node) => {
+        if (!node?.querySelector?.("[data-state], button")) return false;
+        if (!node.textContent?.trim()) return false;
+        return node.closest?.(".draggable") || node.closest?.('[class*="grid-cols-[minmax(0,1fr)]"]');
+      }) || null
+    );
+  }
+
+  function isHeaderToolbarButton(button, header, rect, titleRegion) {
+    if (!button || button.closest?.(`#${CODEX_PLUS_MENU_ID}`)) return false;
+    if (!(rect.width > 0 && rect.height > 0 && rect.left > innerWidth / 2)) return false;
+    const buttonCluster = button.closest(HEADER_TOOLBAR_CLUSTER_SELECTOR);
+    if (buttonCluster && header?.contains(buttonCluster)) return true;
+    if (titleRegion?.contains?.(button)) return false;
+    return !!button.closest?.(HEADER_TOOLBAR_CLASS_SELECTOR);
+  }
+
+  function findHeaderToolbarAnchor() {
+    const header = document.querySelector(APP_HEADER_SELECTOR) || document.querySelector("header");
+    if (!header) return null;
+    const title = headerTitleRegion(header);
+    const toolbarButtons = Array.from(header.querySelectorAll("button"))
+      .map((button) => ({ button, rect: normalizeRect(button.getBoundingClientRect?.()) }))
+      .filter(({ button, rect }) => rect && isHeaderToolbarButton(button, header, rect, title))
+      .sort((left, right) => left.rect.left - right.rect.left);
+    const anchor = toolbarButtons[0];
+    if (!anchor) return null;
+    const measuredGap = toolbarButtons[1] ? toolbarButtons[1].rect.left - toolbarButtons[0].rect.right : 0;
+    const styles = anchor.button.parentElement ? getComputedStyle(anchor.button.parentElement) : null;
+    const gap = Math.max(FLOATING_SAFE_GAP, numericCssValue(styles?.columnGap || styles?.gap), measuredGap, 0);
+    return { rect: anchor.rect, gap };
+  }
+
+  function collectFloatingAnchors() {
+    const anchors = [];
+    const plusMenu = document.getElementById(CODEX_PLUS_MENU_ID);
+    const plusMenuRect = visibleTopRect(plusMenu);
+    if (plusMenuRect) anchors.push({ rect: plusMenuRect, gap: FLOATING_SAFE_GAP });
+    const headerAnchor = findHeaderToolbarAnchor();
+    if (headerAnchor) anchors.push(headerAnchor);
+    return anchors;
+  }
+
   function findToolbar() {
     return null;
 
-    const plusMenu = document.getElementById("codex-plus-menu");
+    const plusMenu = document.getElementById(CODEX_PLUS_MENU_ID);
     if (plusMenu?.parentElement && plusMenu.getBoundingClientRect().top >= 30) {
       return plusMenu.parentElement;
     }
@@ -2640,7 +2785,8 @@
       rect.height || FLOATING_HEIGHT,
       innerWidth,
       innerHeight,
-      collectTopObstacleRects()
+      collectTopObstacleRects(),
+      collectFloatingAnchors()
     );
     root.style.top = `${Math.round(layout.top)}px`;
     root.style.right = `${Math.round(layout.right)}px`;
