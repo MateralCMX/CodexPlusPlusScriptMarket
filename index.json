@@ -1,24 +1,7 @@
 {
   "version": 1,
-  "updated_at": "2026-07-04T08:39:43.000Z",
+  "updated_at": "2026-07-06T08:45:38.039Z",
   "scripts": [
-    {
-      "id": "codex-context-ring-restore",
-      "name": "Codex Context Ring Restore",
-      "description": "还原官方圆环上下文体验",
-      "version": "0.1.2",
-      "author": "win9zhx",
-      "tags": [
-        "context",
-        "ring",
-        "ui",
-        "restore",
-        "native"
-      ],
-      "homepage": "",
-      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-context-ring-restore.js",
-      "sha256": "e3d9409442f17112fe41542fefab8cd62b2776fc8808d8ac2d841630f127d676"
-    },
     {
       "id": "codex-context-used-meter",
       "name": "Codex Context Used Meter",
