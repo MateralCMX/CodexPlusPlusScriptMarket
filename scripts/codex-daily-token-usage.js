@@ -25,7 +25,12 @@
   const POLL_INTERVAL_MS = 1000;
   const RETAIN_DAYS = 5;
   const MAX_TURNS_PER_DAY = 2000;
+  const MAX_TOOL_CALLS_PER_DAY = 500;
+  const MAX_TOOL_CALL_EVENT_KEYS_PER_DAY = 3000;
+  const MAX_TOOL_CALL_EVENTS_PER_DAY = 3000;
+  const TOOL_USAGE_MATCH_WINDOW_MS = 15 * 60 * 1000;
   const CAPTURE_DEDUPE_WINDOW_MS = 3000;
+  const TOOL_CALL_DEDUPE_WINDOW_MS = 3000;
   const MAX_CAPTURE_BODY_CHARS = 2_000_000;
   const EXTERNAL_EMPTY_LIMIT = 4;
   const TREND_DAYS = 5;
@@ -42,6 +47,9 @@
   const PANEL_GAP = 8;
   const PANEL_MARGIN = 12;
   const WINDOW_BUTTON_SAFE_RIGHT = 132;
+  const DOM_TOOL_DESCRIPTORS = [
+    { selector: '[data-testid="exec-shell-body"]', testId: "exec-shell-body", kind: "plugin", name: "exec_command" },
+  ];
 
   const previous = window[API_KEY];
   if (previous && typeof previous.destroy === "function") {
@@ -434,6 +442,82 @@
     return { model: UNKNOWN_MODEL, confidence: "unknown" };
   }
 
+  function normalizeToolName(value) {
+    const text = String(value ?? "").trim();
+    if (!text || /^(none|null|undefined)$/i.test(text)) return "";
+    return text.replace(/\s+/g, " ").slice(0, 160);
+  }
+
+  function normalizeToolNamespace(value) {
+    const text = String(value ?? "").trim();
+    if (!text || /^(none|null|undefined)$/i.test(text)) return "";
+    return text.replace(/\s+/g, " ").slice(0, 120);
+  }
+
+  function parseMcpToolName(name) {
+    const normalized = normalizeToolName(name);
+    if (!normalized.startsWith("mcp__")) return null;
+    const parts = normalized.split("__").filter(Boolean);
+    if (parts.length < 3 || parts[0] !== "mcp") return null;
+    return {
+      namespace: normalizeToolNamespace(parts[1]),
+      name: normalizeToolName(parts.slice(2).join("__")),
+    };
+  }
+
+  function classifyToolKind(name, namespace, kind = "") {
+    const text = `${kind} ${namespace || ""} ${name || ""}`.toLowerCase();
+    if (text.includes("mcp") || String(name || "").startsWith("mcp__")) return "mcp";
+    return "plugin";
+  }
+
+  function normalizeToolEvent(event) {
+    if (!event || typeof event !== "object") return null;
+    const parsedMcpName = parseMcpToolName(event.name);
+    const rawName = parsedMcpName?.name || event.name;
+    const name = normalizeToolName(rawName);
+    if (!name) return null;
+
+    const namespace = normalizeToolNamespace(event.namespace || parsedMcpName?.namespace);
+    const kind = classifyToolKind(name, namespace, event.kind || (parsedMcpName ? "mcp" : ""));
+    return {
+      kind,
+      name,
+      namespace,
+      id: normalizeToolName(event.id),
+      source: normalizeToolName(event.source),
+      timestamp: parseTimestamp(event.timestamp) || Date.now(),
+      turnKey: normalizeConversationKey(event.turnKey || event.turn_id || event.turnId),
+      conversationKey: normalizeConversationKey(event.conversationKey || event.conversationId || event.conversation_id),
+    };
+  }
+
+  function toolCallKey(kind, namespace, name) {
+    return [kind || "plugin", namespace || "", name || ""].join("|").toLowerCase();
+  }
+
+  function toolCallEventKey(event) {
+    if (!event?.id) return "";
+    return `${event.kind || "plugin"}|${event.namespace || ""}|${event.name || ""}|id:${event.id}`.toLowerCase();
+  }
+
+  function displayToolKind(kind) {
+    return kind === "mcp" ? "MCP" : "插件";
+  }
+
+  function compactToolEvent(event, timestamp) {
+    return {
+      kind: event.kind,
+      name: event.name,
+      namespace: event.namespace,
+      id: event.id,
+      source: event.source || "capture",
+      timestamp,
+      turnKey: event.turnKey || "",
+      conversationKey: event.conversationKey || "",
+    };
+  }
+
   function isUsageTurn(turn) {
     if (!turn || typeof turn !== "object" || !turn.turnId) return false;
     const usage = normalizeUsage(turn.usage);
@@ -692,8 +776,133 @@
     return true;
   }
 
+  function recordToolCall(rawEvent, timestamp = Date.now()) {
+    const event = normalizeToolEvent({ ...rawEvent, timestamp: rawEvent?.timestamp || timestamp });
+    if (!event) return false;
+
+    const now = Number.isFinite(event.timestamp) ? event.timestamp : Date.now();
+    cleanupRecentToolCallKeys(now);
+    const persistedEventKey = toolCallEventKey(event);
+    const dedupeKey =
+      persistedEventKey ||
+      `${event.kind}|${event.namespace}|${event.name}|${event.source}|${Math.floor(now / TOOL_CALL_DEDUPE_WINDOW_MS)}`;
+    if (recentToolCallKeys.has(dedupeKey)) return false;
+    recentToolCallKeys.set(dedupeKey, now);
+
+    const dateKey = getDateKey(now);
+    const day = state.days[dateKey] || { turns: {}, updatedAt: 0 };
+    if (!day.turns || typeof day.turns !== "object") day.turns = {};
+    if (!day.toolCalls || typeof day.toolCalls !== "object") day.toolCalls = {};
+    if (!day.toolCallEventKeys || typeof day.toolCallEventKeys !== "object") day.toolCallEventKeys = {};
+    if (!day.toolEvents || typeof day.toolEvents !== "object") day.toolEvents = {};
+    if (persistedEventKey && day.toolCallEventKeys[persistedEventKey]) {
+      if (!day.toolEvents[persistedEventKey]) {
+        day.toolEvents[persistedEventKey] = compactToolEvent(event, now);
+        state.days[dateKey] = day;
+        return true;
+      }
+      return false;
+    }
+
+    const key = toolCallKey(event.kind, event.namespace, event.name);
+    const existing = day.toolCalls[key] || {};
+    day.toolCalls[key] = {
+      kind: event.kind,
+      name: event.name,
+      namespace: event.namespace,
+      count: toCount(existing.count) + 1,
+      lastCalledAt: Math.max(toCount(existing.lastCalledAt), now),
+      source: event.source || existing.source || "capture",
+    };
+    day.updatedAt = Math.max(day.updatedAt || 0, now);
+    if (persistedEventKey) day.toolCallEventKeys[persistedEventKey] = now;
+    if (persistedEventKey) day.toolEvents[persistedEventKey] = compactToolEvent(event, now);
+
+    const keys = Object.keys(day.toolCalls);
+    if (keys.length > MAX_TOOL_CALLS_PER_DAY) {
+      keys
+        .sort((a, b) => (day.toolCalls[a].lastCalledAt || 0) - (day.toolCalls[b].lastCalledAt || 0))
+        .slice(0, keys.length - MAX_TOOL_CALLS_PER_DAY)
+        .forEach((id) => delete day.toolCalls[id]);
+    }
+    const eventKeys = Object.keys(day.toolCallEventKeys);
+    if (eventKeys.length > MAX_TOOL_CALL_EVENT_KEYS_PER_DAY) {
+      eventKeys
+        .sort((a, b) => toCount(day.toolCallEventKeys[a]) - toCount(day.toolCallEventKeys[b]))
+        .slice(0, eventKeys.length - MAX_TOOL_CALL_EVENT_KEYS_PER_DAY)
+        .forEach((id) => {
+          delete day.toolCallEventKeys[id];
+          delete day.toolEvents[id];
+        });
+    }
+    const toolEventKeys = Object.keys(day.toolEvents);
+    if (toolEventKeys.length > MAX_TOOL_CALL_EVENTS_PER_DAY) {
+      toolEventKeys
+        .sort((a, b) => toCount(day.toolEvents[a]?.timestamp) - toCount(day.toolEvents[b]?.timestamp))
+        .slice(0, toolEventKeys.length - MAX_TOOL_CALL_EVENTS_PER_DAY)
+        .forEach((id) => delete day.toolEvents[id]);
+    }
+
+    state.days[dateKey] = day;
+    return true;
+  }
+
+  function normalizeStoredToolEvent(value, storageKey = "") {
+    const event = normalizeToolEvent(value);
+    if (!event) return null;
+    return {
+      ...event,
+      storageKey,
+      turnKey: normalizeConversationKey(value?.turnKey || event.turnKey),
+      conversationKey: normalizeConversationKey(value?.conversationKey || event.conversationKey),
+    };
+  }
+
+  function turnIdentityKeys(id, turn) {
+    return conversationKeyVariants(id)
+      .concat(
+        conversationKeyVariants(turn?.turnId),
+        conversationKeyVariants(turn?.turnKey),
+        conversationKeyVariants(turn?.id)
+      )
+      .filter(Boolean);
+  }
+
+  function findExactToolTurnId(event, turnEntries) {
+    const keys = conversationKeyVariants(event.turnKey);
+    if (!keys.length) return "";
+    for (const [id, turn] of turnEntries) {
+      const turnKeys = new Set(turnIdentityKeys(id, turn));
+      if (keys.some((key) => turnKeys.has(key))) return id;
+    }
+    return "";
+  }
+
+  function findNearestToolTurnId(event, turnEntries) {
+    const timestamp = parseTimestamp(event.timestamp);
+    if (!timestamp || event.source === "dom-tool-card") return "";
+    let best = null;
+    for (const [id, turn] of turnEntries) {
+      const updatedAt = toCount(turn?.updatedAt);
+      if (!updatedAt) continue;
+      const distance = Math.abs(updatedAt - timestamp);
+      const isAfterTool = updatedAt >= timestamp;
+      if (distance > TOOL_USAGE_MATCH_WINDOW_MS) continue;
+      const score = distance + (isAfterTool ? 0 : TOOL_USAGE_MATCH_WINDOW_MS / 2);
+      if (!best || score < best.score) best = { id, score };
+    }
+    return best?.id || "";
+  }
+
+  function calculateTurnCost(turn) {
+    const costInfo = calculateUsageCost(turn, getModelPrice(displayModelName(turn?.model)));
+    return costInfo.configured ? costInfo.cost : 0;
+  }
+
   function aggregateDay(dateKey = getDateKey(Date.now())) {
-    const turns = Object.values(state.days[dateKey]?.turns || {});
+    const day = state.days[dateKey] || {};
+    const turnEntries = Object.entries(day.turns || {});
+    const turns = turnEntries.map(([, turn]) => turn);
     const summary = turns.reduce(
       (summary, turn) => {
         summary.input += toCount(turn.input);
@@ -744,6 +953,20 @@
         pricedModels: 0,
         modelsByName: {},
         models: [],
+        toolCallsByKey: {},
+        toolCalls: [],
+        mcpCalls: 0,
+        pluginCalls: 0,
+        toolCallTotal: 0,
+        toolTurnCount: 0,
+        toolCallRate: 0,
+        avgToolsPerToolTurn: 0,
+        toolsPer100kTokens: 0,
+        toolLinkedTurns: 0,
+        toolLinkedTokens: 0,
+        toolLinkedCost: 0,
+        toolLinkedCoverage: 0,
+        toolLinkedEstimated: false,
       }
     );
     summary.models = Object.values(summary.modelsByName)
@@ -758,7 +981,78 @@
         };
       })
       .sort((a, b) => b.total - a.total || a.model.localeCompare(b.model));
+
+    const toolEvents = Object.entries(day.toolEvents || {})
+      .map(([key, value]) => normalizeStoredToolEvent(value, key))
+      .filter(Boolean);
+    const toolTurnsByKey = new Map();
+    const toolTurnKeys = new Set();
+    const matchedTurnIds = new Set();
+    for (const event of toolEvents) {
+      const key = toolCallKey(event.kind, event.namespace, event.name);
+      const turnKey = normalizeConversationKey(event.turnKey);
+      if (turnKey) {
+        toolTurnKeys.add(turnKey);
+        if (!toolTurnsByKey.has(key)) toolTurnsByKey.set(key, new Set());
+        toolTurnsByKey.get(key).add(turnKey);
+      }
+
+      const exactTurnId = findExactToolTurnId(event, turnEntries);
+      const matchedTurnId = exactTurnId || findNearestToolTurnId(event, turnEntries);
+      if (matchedTurnId) {
+        matchedTurnIds.add(matchedTurnId);
+        if (!exactTurnId) summary.toolLinkedEstimated = true;
+      }
+    }
+
+    for (const toolCall of Object.values(day.toolCalls || {})) {
+      const name = normalizeToolName(toolCall.name);
+      if (!name) continue;
+      const namespace = normalizeToolNamespace(toolCall.namespace);
+      const kind = classifyToolKind(name, namespace, toolCall.kind);
+      const key = toolCallKey(kind, namespace, name);
+      const existing =
+        summary.toolCallsByKey[key] ||
+        {
+          kind,
+          name,
+          namespace,
+          count: 0,
+          lastCalledAt: 0,
+          source: "",
+          turns: 0,
+        };
+      existing.count += Math.max(1, toCount(toolCall.count));
+      existing.lastCalledAt = Math.max(existing.lastCalledAt, toCount(toolCall.lastCalledAt));
+      existing.source = toolCall.source || existing.source;
+      existing.turns = Math.max(existing.turns, toolTurnsByKey.get(key)?.size || 0);
+      summary.toolCallsByKey[key] = existing;
+      summary.updatedAt = Math.max(summary.updatedAt, existing.lastCalledAt);
+      if (kind === "mcp") summary.mcpCalls += Math.max(1, toCount(toolCall.count));
+      else summary.pluginCalls += Math.max(1, toCount(toolCall.count));
+    }
+    summary.toolCallTotal = summary.mcpCalls + summary.pluginCalls;
+    summary.toolTurnCount = toolTurnKeys.size;
+    summary.toolCallRate = summary.turns > 0 ? summary.toolTurnCount / summary.turns : 0;
+    summary.avgToolsPerToolTurn = summary.toolTurnCount > 0 ? summary.toolCallTotal / summary.toolTurnCount : 0;
+    summary.toolsPer100kTokens = summary.total > 0 ? (summary.toolCallTotal / summary.total) * 100000 : 0;
+    for (const turnId of matchedTurnIds) {
+      const turn = day.turns?.[turnId];
+      if (!turn) continue;
+      summary.toolLinkedTurns += 1;
+      summary.toolLinkedTokens += toCount(turn.total);
+      summary.toolLinkedCost += calculateTurnCost(turn);
+    }
+    summary.toolLinkedCoverage = summary.toolTurnCount > 0 ? summary.toolLinkedTurns / summary.toolTurnCount : 0;
+    summary.toolCalls = Object.values(summary.toolCallsByKey).sort(
+      (a, b) =>
+        b.count - a.count ||
+        displayToolKind(a.kind).localeCompare(displayToolKind(b.kind)) ||
+        a.name.localeCompare(b.name)
+    );
+
     delete summary.modelsByName;
+    delete summary.toolCallsByKey;
     return summary;
   }
 
@@ -836,6 +1130,19 @@
     return new Intl.NumberFormat("zh-CN").format(toCount(value));
   }
 
+  function formatDecimal(value, digits = 1) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return "0";
+    return number.toFixed(digits).replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
+  }
+
+  function formatPercent(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number <= 0) return "0%";
+    const percent = Math.min(100, number * 100);
+    return `${formatDecimal(percent, percent >= 10 ? 1 : 2)}%`;
+  }
+
   function formatTime(timestamp) {
     if (!timestamp) return "暂无";
     return new Intl.DateTimeFormat("zh-CN", {
@@ -874,6 +1181,17 @@
       turns: toCount(snapshot?.turns),
       cost: Number(snapshot?.cost) || 0,
       models: Array.isArray(snapshot?.models) ? snapshot.models.slice(0, 4) : [],
+      toolCalls: Array.isArray(snapshot?.toolCalls) ? snapshot.toolCalls.slice(0, 4) : [],
+      mcpCalls: toCount(snapshot?.mcpCalls),
+      pluginCalls: toCount(snapshot?.pluginCalls),
+      toolCallTotal: toCount(snapshot?.toolCallTotal),
+      toolTurnCount: toCount(snapshot?.toolTurnCount),
+      toolCallRate: Number(snapshot?.toolCallRate) || 0,
+      avgToolsPerToolTurn: Number(snapshot?.avgToolsPerToolTurn) || 0,
+      toolsPer100kTokens: Number(snapshot?.toolsPer100kTokens) || 0,
+      toolLinkedTurns: toCount(snapshot?.toolLinkedTurns),
+      toolLinkedTokens: toCount(snapshot?.toolLinkedTokens),
+      toolLinkedCost: Number(snapshot?.toolLinkedCost) || 0,
       cacheRate: input > 0 ? Math.min(100, (cached / input) * 100) : 0,
       outputRate: total > 0 ? Math.min(100, (output / total) * 100) : 0,
       trend: buildTrendData(snapshot?.dateKey || getDateKey(Date.now())),
@@ -916,6 +1234,20 @@
     context.fillStyle = "#ffffff";
     context.font = '700 34px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif';
     context.fillText(value, x + 22, y + 112);
+  }
+
+  function truncateCanvasText(context, text, maxWidth) {
+    const source = String(text || "");
+    if (!source || context.measureText(source).width <= maxWidth) return source;
+    const ellipsis = "…";
+    let low = 0;
+    let high = source.length;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (context.measureText(`${source.slice(0, mid)}${ellipsis}`).width <= maxWidth) low = mid;
+      else high = mid - 1;
+    }
+    return `${source.slice(0, Math.max(0, low))}${ellipsis}`;
   }
 
   function drawShareTrend(context, trend, x, y, width, height) {
@@ -993,20 +1325,89 @@
     context.textAlign = "left";
   }
 
+  function drawShareTools(context, model, x, y, width, height) {
+    fillRoundedRect(context, x, y, width, height, 28, "rgba(255, 255, 255, 0.07)");
+    context.strokeStyle = "rgba(255, 255, 255, 0.12)";
+    roundedRectPath(context, x, y, width, height, 28);
+    context.stroke();
+
+    context.fillStyle = "#ffffff";
+    context.font = '650 25px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+    context.fillText("工具调用", x + 30, y + 43);
+
+    context.textAlign = "right";
+    context.fillStyle = "rgba(226, 232, 255, 0.58)";
+    context.font = '500 20px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+    context.fillText(
+      `MCP ${formatExact(model.mcpCalls)} · 插件 ${formatExact(model.pluginCalls)}`,
+      x + width - 30,
+      y + 43
+    );
+    context.textAlign = "left";
+
+    const metricY = y + 68;
+    const metricHeight = 66;
+    const metricWidth = (width - 60 - 36) / 4;
+    const metrics = [
+      { label: "总调用", value: `${formatExact(model.toolCallTotal)} 次`, accent: "#4FB6FF" },
+      { label: "可识别请求", value: `${formatExact(model.toolTurnCount)} 个`, accent: "#9D7CFF" },
+      { label: "调用率", value: formatPercent(model.toolCallRate), accent: "#4EE4B1" },
+      { label: "调用密度", value: `${formatDecimal(model.toolsPer100kTokens, 2)}/10万T`, accent: "#FFB35A" },
+    ];
+    metrics.forEach((metric, index) => {
+      const metricX = x + 30 + index * (metricWidth + 12);
+      fillRoundedRect(context, metricX, metricY, metricWidth, metricHeight, 16, "rgba(5, 8, 24, 0.32)");
+      fillRoundedRect(context, metricX + 14, metricY + 16, 8, 8, 4, metric.accent);
+      context.fillStyle = "rgba(226, 232, 255, 0.54)";
+      context.font = '500 17px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+      context.fillText(metric.label, metricX + 29, metricY + 25);
+      context.fillStyle = "#ffffff";
+      context.font = '700 20px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif';
+      context.fillText(metric.value, metricX + 14, metricY + 53);
+    });
+
+    const topTool = model.toolCalls?.[0];
+    const topToolName = topTool
+      ? `${topTool.namespace ? `${topTool.namespace} / ` : ""}${topTool.name}`
+      : "暂无可识别工具";
+    const topToolText = topTool
+      ? `Top：${topToolName} · ${formatExact(topTool.count)} 次${topTool.turns ? ` / ${formatExact(topTool.turns)} 个请求` : ""}`
+      : "Top：暂无可识别工具调用";
+    context.fillStyle = "rgba(226, 232, 255, 0.5)";
+    context.font = '500 18px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+    context.fillText(
+      truncateCanvasText(context, topToolText, model.toolLinkedTurns ? width - 490 : width - 60),
+      x + 30,
+      y + height - 30
+    );
+
+    if (model.toolLinkedTurns) {
+      context.textAlign = "right";
+      context.fillStyle = "rgba(114, 195, 255, 0.72)";
+      context.font = '650 18px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
+      context.fillText(
+        `关联用量 ${formatCompact(model.toolLinkedTokens)} · ${formatCost(model.toolLinkedCost)}`,
+        x + width - 30,
+        y + height - 30
+      );
+      context.textAlign = "left";
+    }
+  }
+
   function createShareCanvas(dateKey = selectedDateKey) {
     const model = buildShareModel(aggregateDay(clampDateKey(dateKey)));
     const canvas = document.createElement("canvas");
     canvas.width = 1200;
-    canvas.height = 900;
+    canvas.height = 1100;
     const context = canvas.getContext("2d");
     if (!context) throw new Error("当前环境不支持 Canvas 2D");
 
-    const background = context.createLinearGradient(0, 0, 1200, 900);
+    const background = context.createLinearGradient(0, 0, 1200, 1100);
     background.addColorStop(0, "#070A18");
     background.addColorStop(0.5, "#11132D");
     background.addColorStop(1, "#21104A");
     context.fillStyle = background;
-    context.fillRect(0, 0, 1200, 900);
+    context.fillRect(0, 0, 1200, 1100);
 
     const blueGlow = context.createRadialGradient(160, 120, 0, 160, 120, 430);
     blueGlow.addColorStop(0, "rgba(35, 160, 255, 0.34)");
@@ -1018,11 +1419,11 @@
     purpleGlow.addColorStop(0, "rgba(153, 72, 255, 0.34)");
     purpleGlow.addColorStop(1, "rgba(153, 72, 255, 0)");
     context.fillStyle = purpleGlow;
-    context.fillRect(500, 300, 700, 600);
+    context.fillRect(500, 300, 700, 800);
 
     context.fillStyle = "rgba(255, 255, 255, 0.035)";
     for (let x = 40; x < 1200; x += 42) {
-      for (let y = 38; y < 900; y += 42) {
+      for (let y = 38; y < 1100; y += 42) {
         context.beginPath();
         context.arc(x, y, 1.5, 0, Math.PI * 2);
         context.fill();
@@ -1103,18 +1504,23 @@
     });
 
     drawShareTrend(context, model.trend, 70, 590, 1066, 188);
+    drawShareTools(context, model, 70, 800, 1066, 188);
 
     context.fillStyle = "rgba(226, 232, 255, 0.46)";
     context.font = '500 19px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif';
     const modelText = model.models.length
       ? `主力 Model：${model.models.map((item) => item.model).join(" / ")}`
       : "Model：暂无可识别数据";
-    context.fillText(modelText.slice(0, 72), 72, 809);
-    context.fillText("数据仅来自本机 Codex++，成本为本地配置价格估算，不包含会话内容", 72, 833);
+    context.fillText(truncateCanvasText(context, modelText, 840), 72, 1034);
+    context.fillText(
+      truncateCanvasText(context, "数据仅来自本机 Codex++，成本为本地配置价格估算，不包含会话内容", 900),
+      72,
+      1062
+    );
     context.textAlign = "right";
     context.fillStyle = "rgba(114, 195, 255, 0.72)";
     context.font = '650 19px -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif';
-    context.fillText("GENERATED LOCALLY", 1129, 833);
+    context.fillText("GENERATED LOCALLY", 1129, 1062);
     context.textAlign = "left";
 
     return canvas;
@@ -1147,11 +1553,20 @@
   }
 
   const recentCaptureKeys = new Map();
+  const recentToolCallKeys = new Map();
 
   function cleanupRecentCaptureKeys(now = Date.now()) {
     for (const [key, timestamp] of recentCaptureKeys) {
       if (now - timestamp > CAPTURE_DEDUPE_WINDOW_MS * 4) {
         recentCaptureKeys.delete(key);
+      }
+    }
+  }
+
+  function cleanupRecentToolCallKeys(now = Date.now()) {
+    for (const [key, timestamp] of recentToolCallKeys) {
+      if (now - timestamp > TOOL_CALL_DEDUPE_WINDOW_MS * 4) {
+        recentToolCallKeys.delete(key);
       }
     }
   }
@@ -1298,6 +1713,247 @@
     });
   }
 
+  function firstToolName(...values) {
+    for (const value of values) {
+      if (value && typeof value === "object") {
+        const nested = firstToolName(
+          value.name,
+          value.tool,
+          value.toolName,
+          value.tool_name,
+          value.function?.name,
+          value.item?.name
+        );
+        if (nested) return nested;
+        continue;
+      }
+      const name = normalizeToolName(value);
+      if (name) return name;
+    }
+    return "";
+  }
+
+  function firstToolNamespace(...values) {
+    for (const value of values) {
+      if (value && typeof value === "object") {
+        const nested = firstToolNamespace(
+          value.namespace,
+          value.server,
+          value.serverName,
+          value.server_name,
+          value.mcpServer,
+          value.mcp_server
+        );
+        if (nested) return nested;
+        continue;
+      }
+      const namespace = normalizeToolNamespace(value);
+      if (namespace) return namespace;
+    }
+    return "";
+  }
+
+  function extractToolCallId(value) {
+    if (!value || typeof value !== "object") return "";
+    return firstToolName(
+      value.call_id,
+      value.callId,
+      value.tool_call_id,
+      value.toolCallId,
+      value.item_id,
+      value.itemId,
+      value.id,
+      value.event_id,
+      value.eventId,
+      value.request_id,
+      value.requestId,
+      value.response_id,
+      value.responseId,
+      value.item?.call_id,
+      value.item?.id,
+      value.function?.id
+    );
+  }
+
+  function extractToolCallTimestamp(value) {
+    if (!value || typeof value !== "object") return null;
+    return parseTimestamp(
+      value.timestamp ??
+        value.created_at ??
+        value.createdAt ??
+        value.updated_at ??
+        value.updatedAt ??
+        value.item?.created_at ??
+        value.item?.createdAt
+    );
+  }
+
+  function extractToolTurnKey(value) {
+    if (!value || typeof value !== "object") return "";
+    return normalizeConversationKey(
+      value.turnKey ??
+        value.turn_key ??
+        value.turnId ??
+        value.turn_id ??
+        value.internal_chat_message_metadata_passthrough?.turn_id ??
+        value.internalChatMessageMetadataPassthrough?.turnId ??
+        value.item?.turnKey ??
+        value.item?.turn_id ??
+        value.item?.internal_chat_message_metadata_passthrough?.turn_id
+    );
+  }
+
+  function isMcpToolCallMethod(method) {
+    const text = String(method || "").toLowerCase();
+    return /(^|\/)(tools\/call|tool\/call|mcp\/tool\/call)$/.test(text) || text.includes("tools/call");
+  }
+
+  function mcpRequestParams(value) {
+    if (!value || typeof value !== "object") return {};
+    const request = value.request && typeof value.request === "object" ? value.request : {};
+    const body = parseMaybeJsonObject(value.body);
+    if (value.params && typeof value.params === "object") return value.params;
+    if (request.params && typeof request.params === "object") return request.params;
+    if (body?.params && typeof body.params === "object") return body.params;
+    return {};
+  }
+
+  function extractMcpToolCallEvent(value) {
+    if (!value || typeof value !== "object") return null;
+    const method = String(value.method || value.request?.method || "");
+    if (!isMcpToolCallMethod(method)) return null;
+    const params = mcpRequestParams(value);
+    const name = firstToolName(params, value);
+    if (!name) return null;
+    return {
+      kind: "mcp",
+      name,
+      namespace: firstToolNamespace(params, value),
+      id: extractToolCallId(value) || extractToolCallId(value.request) || extractToolCallId(params),
+      source: "mcp-request",
+      timestamp: extractToolCallTimestamp(value),
+      turnKey: extractToolTurnKey(value) || extractToolTurnKey(value.request) || extractToolTurnKey(params),
+      conversationKey: extractConversationKey(value),
+    };
+  }
+
+  function isFunctionToolItem(value) {
+    if (!value || typeof value !== "object") return false;
+    const type = String(value.type || "").toLowerCase();
+    return (
+      type === "function_call" ||
+      type === "custom_tool_call" ||
+      type === "tool_call" ||
+      Boolean(value.function?.name)
+    );
+  }
+
+  function isToolCallDoneEvent(type) {
+    return /^(response\.)?output_item\.(done|completed)$/.test(String(type || "").toLowerCase());
+  }
+
+  function isToolCallPreviewEvent(type) {
+    return /(output_item\.added|function_call_arguments\.delta|tool_call.*delta)$/i.test(String(type || ""));
+  }
+
+  function functionToolCallEvent(value, source = "function-call") {
+    if (!isFunctionToolItem(value)) return null;
+    const name = firstToolName(value);
+    if (!name) return null;
+    return {
+      kind: classifyToolKind(name, firstToolNamespace(value), value.kind),
+      name,
+      namespace: firstToolNamespace(value),
+      id: extractToolCallId(value),
+      source,
+      timestamp: extractToolCallTimestamp(value),
+      turnKey: extractToolTurnKey(value),
+      conversationKey: extractConversationKey(value),
+    };
+  }
+
+  function dedupeToolCallEvents(events) {
+    const seen = new Set();
+    const normalizedEvents = [];
+    for (const event of events) {
+      const normalized = normalizeToolEvent(event);
+      if (!normalized) continue;
+      const key = normalized.id
+        ? `${normalized.kind}|${normalized.namespace}|${normalized.name}|id:${normalized.id}`
+        : `${normalized.kind}|${normalized.namespace}|${normalized.name}|${normalized.source || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      normalizedEvents.push(normalized);
+    }
+    return normalizedEvents;
+  }
+
+  function extractToolCallEvents(value, depth = 0) {
+    if (!value || depth > 8) return [];
+    if (typeof value === "string") {
+      return dedupeToolCallEvents(parseTextPayloads(value).flatMap((item) => extractToolCallEvents(item, depth + 1)));
+    }
+    if (Array.isArray(value)) {
+      return dedupeToolCallEvents(value.flatMap((item) => extractToolCallEvents(item, depth + 1)));
+    }
+    if (typeof value !== "object") return [];
+
+    const events = [];
+    const type = String(value.type || "");
+    const mcpEvent = extractMcpToolCallEvent(value);
+    if (mcpEvent) events.push(mcpEvent);
+
+    if (isToolCallDoneEvent(type)) {
+      const doneEvent = functionToolCallEvent(value.item || value.output_item || value, type || "output-item-done");
+      if (doneEvent) events.push(doneEvent);
+    } else if (!isToolCallPreviewEvent(type)) {
+      const directEvent = functionToolCallEvent(value, "function-call");
+      if (directEvent) events.push(directEvent);
+    }
+
+    const toolCalls = [
+      ...(Array.isArray(value.tool_calls) ? value.tool_calls : []),
+      ...(Array.isArray(value.toolCalls) ? value.toolCalls : []),
+    ];
+    for (const call of toolCalls) {
+      const toolCallEvent = functionToolCallEvent(call, "tool-calls");
+      if (toolCallEvent) events.push(toolCallEvent);
+    }
+
+    if (!isToolCallPreviewEvent(type)) {
+      for (const key of [
+        "response",
+        "data",
+        "body",
+        "message",
+        "result",
+        "event",
+        "params",
+        "payload",
+        "item",
+        "output",
+        "choices",
+        "delta",
+      ]) {
+        let nestedValue = value[key];
+        if (nestedValue && typeof nestedValue === "object" && !Array.isArray(nestedValue)) {
+          const inherited = {};
+          if (value.timestamp && !nestedValue.timestamp) inherited.timestamp = value.timestamp;
+          const parentTurnKey = extractToolTurnKey(value);
+          if (parentTurnKey && !extractToolTurnKey(nestedValue)) inherited.turnKey = parentTurnKey;
+          const parentConversationKey = extractConversationKey(value);
+          if (parentConversationKey && !extractConversationKey(nestedValue)) {
+            inherited.conversationId = parentConversationKey;
+          }
+          if (Object.keys(inherited).length) nestedValue = { ...nestedValue, ...inherited };
+        }
+        events.push(...extractToolCallEvents(nestedValue, depth + 1));
+      }
+    }
+
+    return dedupeToolCallEvents(events);
+  }
+
   function rememberCapturedUsage(candidate, source, url = "") {
     const now = Date.now();
     cleanupRecentCaptureKeys(now);
@@ -1335,11 +1991,152 @@
     return changed;
   }
 
+  function processToolCallPayload(payload, source = "capture") {
+    const events = extractToolCallEvents(payload).map((event) => ({
+      ...event,
+      source: event.source || source,
+    }));
+    if (!events.length) return false;
+
+    let changed = false;
+    for (const event of events) {
+      changed = recordToolCall(event) || changed;
+    }
+    if (changed) {
+      pruneState();
+      saveState();
+      render({ animate: false });
+    }
+    return changed;
+  }
+
+  function safeQuery(rootNode, selector) {
+    try {
+      return rootNode && typeof rootNode.querySelector === "function" ? rootNode.querySelector(selector) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function safeQueryAll(rootNode, selector) {
+    try {
+      return rootNode && typeof rootNode.querySelectorAll === "function"
+        ? Array.from(rootNode.querySelectorAll(selector))
+        : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function elementAttribute(element, name) {
+    try {
+      return typeof element?.getAttribute === "function" ? element.getAttribute(name) || "" : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function closestElement(element, selector) {
+    try {
+      return typeof element?.closest === "function" ? element.closest(selector) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function shortHash(value) {
+    let hash = 2166136261;
+    const text = String(value || "");
+    for (let index = 0; index < text.length; index += 1) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(36);
+  }
+
+  function currentConversationIdFromDom(rootNode = document) {
+    const selectors = [
+      "[data-above-composer-conversation-id]",
+      "[data-thread-conversation-id]",
+      "[data-conversation-id]",
+    ];
+    for (const selector of selectors) {
+      const value = elementAttribute(safeQuery(rootNode, selector), selector.slice(1, -1));
+      const key = normalizeConversationKey(value);
+      if (key) return key;
+    }
+    return "";
+  }
+
+  function domToolEventFromElement(element, descriptor, rootNode = document) {
+    if (!element || !descriptor) return null;
+    const name = normalizeToolName(
+      elementAttribute(element, "data-tool-name") ||
+        elementAttribute(element, "data-mcp-tool-name") ||
+        elementAttribute(element, "data-plugin-name") ||
+        descriptor.name
+    );
+    if (!name) return null;
+
+    const testId = normalizeToolName(elementAttribute(element, "data-testid") || descriptor.testId || "tool");
+    const namespace = normalizeToolNamespace(
+      elementAttribute(element, "data-tool-namespace") ||
+        elementAttribute(element, "data-mcp-server") ||
+        elementAttribute(element, "data-plugin-namespace")
+    );
+    const explicitKind = elementAttribute(element, "data-mcp-tool-name") ? "mcp" : descriptor.kind;
+    const conversationKey = currentConversationIdFromDom(rootNode) || "conversation";
+    const turnElement = closestElement(element, "[data-turn-key]");
+    const turnKey = normalizeConversationKey(elementAttribute(turnElement, "data-turn-key"));
+    const scope = turnElement || rootNode;
+    const siblingIndex = Math.max(0, safeQueryAll(scope, descriptor.selector).indexOf(element));
+    const fallbackText = normalizeToolName(
+      element.textContent || element.parentElement?.textContent || element.parentNode?.textContent || ""
+    );
+    const fallbackKey = `${conversationKey}:visible:${testId}:${siblingIndex}:${shortHash(fallbackText)}`;
+    return {
+      kind: classifyToolKind(name, namespace, explicitKind),
+      name,
+      namespace,
+      id: `dom:${turnKey ? `${conversationKey}:${turnKey}:${testId}:${siblingIndex}` : fallbackKey}`,
+      source: "dom-tool-card",
+      timestamp: Date.now(),
+      turnKey,
+      conversationKey,
+    };
+  }
+
+  function extractDomToolCallEvents(rootNode = document) {
+    const events = [];
+    for (const descriptor of DOM_TOOL_DESCRIPTORS) {
+      for (const element of safeQueryAll(rootNode, descriptor.selector)) {
+        const event = domToolEventFromElement(element, descriptor, rootNode);
+        if (event) events.push(event);
+      }
+    }
+    return dedupeToolCallEvents(events);
+  }
+
+  function processDomToolCalls(rootNode = document) {
+    const events = extractDomToolCallEvents(rootNode);
+    if (!events.length) return false;
+    let changed = false;
+    for (const event of events) {
+      changed = recordToolCall(event) || changed;
+    }
+    if (changed) {
+      pruneState();
+      saveState();
+    }
+    return changed;
+  }
+
   function processCapturePayload(payload, source, url = "") {
-    if (sourceMode === "external") return false;
-    processModelPayload(payload);
+    const toolChanged = processToolCallPayload(payload, source);
+    if (sourceMode === "external") return toolChanged;
+    processModelPayload(payload, false);
     const candidates = findUsageCandidates(payload);
-    if (!candidates.length) return false;
+    if (!candidates.length) return toolChanged;
     let changed = false;
     for (const candidate of candidates) {
       changed = rememberCapturedUsage(candidate, source, url) || changed;
@@ -1349,29 +2146,30 @@
       saveState();
       render({ animate: true });
     }
-    return changed;
+    return changed || toolChanged;
   }
 
   function shouldProcessStandalonePayload() {
     return sourceMode !== "external" && (captureInstalled || !externalSourceAvailable());
   }
 
-  function processModelPayload(payload) {
-    if (!payload) return false;
+  function processModelPayload(payload, recordTools = true) {
+    const toolChanged = recordTools ? processToolCallPayload(payload, "model") : false;
+    if (!payload) return toolChanged;
     if (typeof payload === "string") {
-      return parseTextPayloads(payload).some((item) => processModelPayload(item));
+      return parseTextPayloads(payload).some((item) => processModelPayload(item, false)) || toolChanged;
     }
     if (Array.isArray(payload)) {
-      return payload.some((item) => processModelPayload(item));
+      return payload.some((item) => processModelPayload(item, false)) || toolChanged;
     }
-    if (typeof payload !== "object") return false;
+    if (typeof payload !== "object") return toolChanged;
 
     const conversationKey = extractConversationKey(payload);
     let observed = observeAppModelMessage(payload);
     observed = observeModel(extractDirectModel(payload), "observed", Date.now(), conversationKey) || observed;
     const body = parseMaybeJsonObject(payload.body);
-    if (body && body !== payload) observed = processModelPayload(body) || observed;
-    return observed;
+    if (body && body !== payload) observed = processModelPayload(body, false) || observed;
+    return observed || toolChanged;
   }
 
   function installModelCapture() {
@@ -1955,6 +2753,7 @@
         white-space: nowrap;
       }
       #${PANEL_ID} .codex-daily-models,
+      #${PANEL_ID} .codex-daily-tools,
       #${PANEL_ID} .codex-daily-price-panel {
         margin-top: 11px;
         padding: 10px 11px;
@@ -1977,9 +2776,42 @@
         color: var(--color-token-foreground-secondary, #737373);
         font-variant-numeric: tabular-nums;
       }
-      #${PANEL_ID} .codex-daily-model-list {
+      #${PANEL_ID} .codex-daily-model-list,
+      #${PANEL_ID} .codex-daily-tool-list {
         display: grid;
         gap: 7px;
+      }
+      #${PANEL_ID} .codex-daily-tool-metrics {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 7px;
+        margin-bottom: 9px;
+      }
+      #${PANEL_ID} .codex-daily-tool-metric {
+        min-width: 0;
+        padding: 7px 8px;
+        border-radius: 9px;
+        background: rgba(127, 127, 127, 0.08);
+      }
+      #${PANEL_ID} .codex-daily-tool-metric span {
+        display: block;
+        margin-bottom: 3px;
+        overflow: hidden;
+        color: var(--color-token-foreground-secondary, #737373);
+        font-size: 10px;
+        line-height: 1.2;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #${PANEL_ID} .codex-daily-tool-metric strong {
+        display: block;
+        overflow: hidden;
+        color: var(--color-token-foreground, #202020);
+        font-size: 12px;
+        font-variant-numeric: tabular-nums;
+        font-weight: 750;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       #${PANEL_ID} .codex-daily-model-row {
         display: grid;
@@ -2012,6 +2844,39 @@
         height: 100%;
         border-radius: inherit;
         background: linear-gradient(90deg, #3BA7FF, #8D6BFF);
+      }
+      #${PANEL_ID} .codex-daily-tool-row {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        gap: 8px;
+        align-items: center;
+        font-size: 11px;
+      }
+      #${PANEL_ID} .codex-daily-tool-kind {
+        min-width: 34px;
+        padding: 2px 6px;
+        border-radius: 999px;
+        background: rgba(59, 167, 255, 0.12);
+        color: #2676d9;
+        font-size: 10px;
+        font-weight: 700;
+        text-align: center;
+      }
+      #${PANEL_ID} .codex-daily-tool-kind.is-plugin {
+        background: rgba(141, 107, 255, 0.13);
+        color: #7652e5;
+      }
+      #${PANEL_ID} .codex-daily-tool-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 600;
+      }
+      #${PANEL_ID} .codex-daily-tool-count {
+        color: var(--color-token-foreground, #202020);
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
       }
       #${PANEL_ID} .codex-daily-price-panel[hidden] {
         display: none;
@@ -2242,6 +3107,31 @@
           </div>
           <div class="codex-daily-model-list"></div>
         </div>
+        <div class="codex-daily-tools">
+          <div class="codex-daily-section-head">
+            <span class="codex-daily-section-title">工具调用</span>
+            <span class="codex-daily-section-meta" data-field="toolMeta">MCP 0 · 插件 0</span>
+          </div>
+          <div class="codex-daily-tool-metrics">
+            <div class="codex-daily-tool-metric">
+              <span>可识别请求</span>
+              <strong data-field="toolTurnCount">0</strong>
+            </div>
+            <div class="codex-daily-tool-metric">
+              <span>调用率</span>
+              <strong data-field="toolCallRate">0%</strong>
+            </div>
+            <div class="codex-daily-tool-metric">
+              <span>调用密度</span>
+              <strong data-field="toolDensity">0 / 10万T</strong>
+            </div>
+            <div class="codex-daily-tool-metric">
+              <span>关联用量</span>
+              <strong data-field="toolLinkedUsage">待关联</strong>
+            </div>
+          </div>
+          <div class="codex-daily-tool-list"></div>
+        </div>
         <div class="codex-daily-price-panel" hidden>
           <div class="codex-daily-section-head">
             <span class="codex-daily-section-title">Model 价格设置</span>
@@ -2388,6 +3278,65 @@
           <span class="codex-daily-model-bar" title="${formatExact(item.total)} Token">
             <span class="codex-daily-model-fill" style="width: ${percent.toFixed(1)}%"></span>
           </span>
+        `;
+        return row;
+      })
+    );
+  }
+
+  function renderToolCalls(snapshot) {
+    if (!panel) return;
+    const list = panel.querySelector(".codex-daily-tool-list");
+    const meta = panel.querySelector('[data-field="toolMeta"]');
+    if (meta) {
+      meta.textContent = `调用 ${formatExact(snapshot.toolCallTotal)} · MCP ${formatExact(snapshot.mcpCalls)} · 插件 ${formatExact(snapshot.pluginCalls)}`;
+    }
+    const toolTurnCount = panel.querySelector('[data-field="toolTurnCount"]');
+    if (toolTurnCount) toolTurnCount.textContent = `${formatExact(snapshot.toolTurnCount)} 个`;
+    const toolCallRate = panel.querySelector('[data-field="toolCallRate"]');
+    if (toolCallRate) toolCallRate.textContent = formatPercent(snapshot.toolCallRate);
+    const toolDensity = panel.querySelector('[data-field="toolDensity"]');
+    if (toolDensity) toolDensity.textContent = `${formatDecimal(snapshot.toolsPer100kTokens, 2)} / 10万T`;
+    const toolLinkedUsage = panel.querySelector('[data-field="toolLinkedUsage"]');
+    if (toolLinkedUsage) {
+      const linkedText = snapshot.toolLinkedTurns
+        ? `${formatCompact(snapshot.toolLinkedTokens)} · ${formatCost(snapshot.toolLinkedCost)}`
+        : "待关联";
+      toolLinkedUsage.textContent = linkedText;
+      toolLinkedUsage.title = snapshot.toolLinkedTurns
+        ? `${formatExact(snapshot.toolLinkedTurns)} 个 turn，${formatExact(snapshot.toolLinkedTokens)} Token${snapshot.toolLinkedEstimated ? "，部分为时间估算" : ""}`
+        : "当前采集源没有可精确关联的 turn 用量";
+    }
+    if (!list) return;
+
+    const tools = Array.isArray(snapshot.toolCalls) ? snapshot.toolCalls : [];
+    if (!tools.length) {
+      const row = document.createElement("div");
+      row.className = "codex-daily-tool-row";
+      row.innerHTML = `
+        <span class="codex-daily-tool-kind">无</span>
+        <span class="codex-daily-tool-name">暂无工具调用</span>
+        <span class="codex-daily-tool-count">0</span>
+      `;
+      list.replaceChildren(row);
+      return;
+    }
+
+    list.replaceChildren(
+      ...tools.slice(0, 6).map((item) => {
+        const row = document.createElement("div");
+        row.className = "codex-daily-tool-row";
+        const kind = displayToolKind(item.kind);
+        const namespace = normalizeToolNamespace(item.namespace);
+        const name = normalizeToolName(item.name);
+        const displayName = namespace ? `${namespace} / ${name}` : name;
+        const countLabel = item.turns
+          ? `${formatExact(item.count)} / ${formatExact(item.turns)}`
+          : formatExact(item.count);
+        row.innerHTML = `
+          <span class="codex-daily-tool-kind ${item.kind === "plugin" ? "is-plugin" : ""}">${kind}</span>
+          <span class="codex-daily-tool-name" title="${escapeHtml(displayName)}">${escapeHtml(displayName)}</span>
+          <span class="codex-daily-tool-count" title="调用次数 / 可识别请求数">${countLabel}</span>
         `;
         return row;
       })
@@ -2575,6 +3524,7 @@
     return {
       rect,
       gap: Math.max(FLOATING_SAFE_GAP, Number(anchor?.gap) || 0),
+      mode: anchor?.mode === "hard" ? "hard" : "soft",
     };
   }
 
@@ -2610,8 +3560,12 @@
       const layoutTop = clampTop(anchor.rect.top + (anchor.rect.height - safeHeight) / 2);
       const layoutRight = viewportWidth - anchor.rect.left + anchor.gap;
       const candidate = candidateRectFromRight(layoutRight, layoutTop, safeWidth, safeHeight, viewportWidth);
-      if (candidateIsClear(candidate)) {
+      if (candidateFits(candidate) && (anchor.mode === "hard" || candidateIsClear(candidate))) {
         return layoutFromLeft(candidate.left, safeWidth, false, layoutTop);
+      }
+      const compactCandidate = candidateRectFromRight(layoutRight, layoutTop, compactWidth, safeHeight, viewportWidth);
+      if (candidateFits(compactCandidate) && (anchor.mode === "hard" || candidateIsClear(compactCandidate))) {
+        return layoutFromLeft(compactCandidate.left, compactWidth, true, layoutTop);
       }
     }
 
@@ -2725,9 +3679,9 @@
     const anchors = [];
     const plusMenu = document.getElementById(CODEX_PLUS_MENU_ID);
     const plusMenuRect = visibleTopRect(plusMenu);
-    if (plusMenuRect) anchors.push({ rect: plusMenuRect, gap: FLOATING_SAFE_GAP });
+    if (plusMenuRect) anchors.push({ rect: plusMenuRect, gap: FLOATING_SAFE_GAP, mode: "hard" });
     const headerAnchor = findHeaderToolbarAnchor();
-    if (headerAnchor) anchors.push(headerAnchor);
+    if (headerAnchor) anchors.push({ ...headerAnchor, mode: "hard" });
     return anchors;
   }
 
@@ -2946,6 +3900,7 @@
     panel.querySelector(".codex-daily-status-text").textContent = sourceStatusText(snapshot);
     renderPanelTrend(buildTrendData(selectedDateKey));
     renderModelBreakdown(snapshot);
+    renderToolCalls(snapshot);
     if (panel.querySelector(".codex-daily-price-panel")?.hidden === false) {
       renderPriceSettings(snapshot);
     }
@@ -2985,7 +3940,9 @@
       saveState();
     }
 
-    const changed = syncFromSource();
+    const sourceChanged = syncFromSource();
+    const domToolChanged = processDomToolCalls();
+    const changed = sourceChanged || domToolChanged;
     mountRoot();
     render({ animate: changed });
     return aggregateDay();
@@ -3041,6 +3998,12 @@
       extractDirectModel,
       extractModelFromAppMessage,
       observeAppModelMessage,
+      normalizeToolName,
+      extractToolCallEvents,
+      processToolCallPayload,
+      recordToolCall,
+      extractDomToolCallEvents,
+      processDomToolCalls,
       calculateUsageCost,
       formatCost,
       getDateKey,
@@ -3087,7 +4050,10 @@
     mountRoot();
     refresh();
 
-    observer = new MutationObserver(() => mountRoot());
+    observer = new MutationObserver(() => {
+      mountRoot();
+      if (processDomToolCalls()) render({ animate: false });
+    });
     observer.observe(document.documentElement, { childList: true, subtree: true });
     document.addEventListener("pointerdown", handleDocumentPointerDown, true);
     window.addEventListener("resize", positionPanel);

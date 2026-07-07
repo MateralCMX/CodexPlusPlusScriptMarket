@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-07-06T08:45:38.039Z",
+  "updated_at": "2026-07-07T07:45:09.000Z",
   "scripts": [
     {
       "id": "codex-context-used-meter",
@@ -67,7 +67,7 @@
       ],
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-daily-token-usage.js",
-      "sha256": "660499e55ac2f4b6cafd32403a584d9a8b0b6d761c5e68d27d793611df4af3b7"
+      "sha256": "daa394c603bc67ff5a3e52930bad7f41d7cf3e4a750883aedc2e7f3397402814"
     },
     {
       "id": "codex-list-pagebuster",
