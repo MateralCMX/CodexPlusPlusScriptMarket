@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.4.9
+// @version      1.4.11
 // @description  每日 Token 统计，近 5 日滚动存储，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.9";
+  const VERSION = "1.4.11";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
@@ -3696,6 +3696,8 @@
   function isTopChromeObstacleNode(node, style) {
     if (!node) return false;
     if (node.id === CODEX_PLUS_MENU_ID || node.closest?.(`#${CODEX_PLUS_MENU_ID}`)) return true;
+    if (node.matches?.(APP_HEADER_SURFACE_SELECTOR)) return false;
+    if (!isPrimaryTopObstacleNode(node) && style?.pointerEvents === "none") return false;
     const header = findAppHeaderElement();
     if (header?.contains?.(node)) return true;
     return style?.position === "fixed" || style?.position === "sticky";
@@ -3889,7 +3891,7 @@
       collectFloatingAnchors()
     );
     root.style.top = `${Math.round(layout.top)}px`;
-    root.style.right = `${Math.round(layout.right)}px`;
+    root.style.right = `${Math.ceil(layout.right)}px`;
     root.style.left = "auto";
     root.style.bottom = "auto";
     root.style.transform = "none";
