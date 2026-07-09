@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.4.7
+// @version      1.4.9
 // @description  每日 Token 统计，近 5 日滚动存储，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.7";
+  const VERSION = "1.4.9";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
@@ -20,8 +20,10 @@
   const STYLE_ID = "codex-daily-token-usage-style";
   const CODEX_PLUS_MENU_ID = "codex-plus-menu";
   const APP_HEADER_SELECTOR = ".app-header-tint";
+  const APP_HEADER_SURFACE_SELECTOR = '[data-testid="app-shell-header-context-menu-surface"]';
   const HEADER_TOOLBAR_CLUSTER_SELECTOR = ".ms-auto.flex.shrink-0.items-center";
   const HEADER_TOOLBAR_CLASS_SELECTOR = '[class*="ms-auto"][class*="shrink-0"][class*="items-center"]';
+  const TOP_OBSTACLE_SELECTOR = `button,[role='button'],input,select,textarea,a[href],#${CODEX_PLUS_MENU_ID},[data-testid]`;
   const POLL_INTERVAL_MS = 1000;
   const RETAIN_DAYS = 5;
   const MAX_TURNS_PER_DAY = 2000;
@@ -64,6 +66,8 @@
   let panel = null;
   let style = null;
   let observer = null;
+  let resizeObserver = null;
+  let layoutRaf = 0;
   let pollTimer = null;
   let midnightTimer = null;
   let closeTimer = null;
@@ -86,6 +90,7 @@
   let lastObservedModelAt = 0;
   let lastObservedModelConfidence = "unknown";
   const modelByConversationKey = new Map();
+  const resizeObservedNodes = new WeakSet();
 
   function toCount(value) {
     const number = Number(value);
@@ -162,6 +167,13 @@
       return Number.isFinite(parsed) && parsed > 1_500_000_000_000 ? parsed : null;
     }
     return null;
+  }
+
+  function parseUuidV7Timestamp(value) {
+    const text = String(value || "").trim();
+    const match = /\b([0-9a-f]{8})-?([0-9a-f]{4})-?7[0-9a-f]{3}-?[89ab][0-9a-f]{3}-?[0-9a-f]{12}\b/i.exec(text);
+    if (!match) return null;
+    return parseTimestamp(Number.parseInt(`${match[1]}${match[2]}`, 16));
   }
 
   function latestNestedTimestamp(items) {
@@ -709,6 +721,7 @@
     const dateKey = getDateKey(timestamp);
     const usage = normalizeUsage(turn.usage);
     const modelMeta = extractTurnModel(turn, timestamp);
+    const conversationKey = normalizeConversationKey(turn.conversationKey || turn.conversationId || turn.conversation_id || extractConversationKey(turn));
     const day = state.days[dateKey] || { turns: {}, updatedAt: 0 };
     const existing = day.turns[turn.turnId];
     const candidate = {
@@ -722,14 +735,25 @@
       source: String(turn.source || "turn-aggregate"),
       model: modelMeta.model,
       modelConfidence: modelMeta.confidence,
+      conversationKey,
     };
 
     if (existing && existing.total > candidate.total) {
-      if (candidate.model !== UNKNOWN_MODEL && (!existing.model || existing.model === UNKNOWN_MODEL)) {
+      if (
+        (candidate.model !== UNKNOWN_MODEL && (!existing.model || existing.model === UNKNOWN_MODEL)) ||
+        (candidate.conversationKey && !existing.conversationKey)
+      ) {
         day.turns[turn.turnId] = {
           ...existing,
-          model: candidate.model,
-          modelConfidence: candidate.modelConfidence,
+          model:
+            candidate.model !== UNKNOWN_MODEL && (!existing.model || existing.model === UNKNOWN_MODEL)
+              ? candidate.model
+              : existing.model,
+          modelConfidence:
+            candidate.model !== UNKNOWN_MODEL && (!existing.model || existing.model === UNKNOWN_MODEL)
+              ? candidate.modelConfidence
+              : existing.modelConfidence,
+          conversationKey: existing.conversationKey || candidate.conversationKey,
           updatedAt: Math.max(existing.updatedAt || 0, candidate.updatedAt),
         };
         state.days[dateKey] = day;
@@ -756,6 +780,7 @@
             candidate.model !== UNKNOWN_MODEL || !existing.model || existing.model === UNKNOWN_MODEL
               ? candidate.modelConfidence
               : existing.modelConfidence || "unknown",
+          conversationKey: candidate.conversationKey || existing.conversationKey || "",
         }
       : candidate;
 
@@ -868,6 +893,25 @@
       .filter(Boolean);
   }
 
+  function turnConversationKeys(turn) {
+    return conversationKeyVariants(turn?.conversationKey).concat(conversationKeyVariants(turn?.conversationId));
+  }
+
+  function eventConversationMatchesTurn(event, turn) {
+    const eventKeys = conversationKeyVariants(event?.conversationKey);
+    if (!eventKeys.length) return true;
+    const turnKeys = new Set(turnConversationKeys(turn));
+    if (!turnKeys.size) return true;
+    return eventKeys.some((key) => turnKeys.has(key));
+  }
+
+  function toolEventUsageTimestamp(event) {
+    if (event?.source === "dom-tool-card") {
+      return parseUuidV7Timestamp(event.turnKey) || parseUuidV7Timestamp(event.id);
+    }
+    return parseTimestamp(event?.timestamp);
+  }
+
   function findExactToolTurnId(event, turnEntries) {
     const keys = conversationKeyVariants(event.turnKey);
     if (!keys.length) return "";
@@ -879,10 +923,11 @@
   }
 
   function findNearestToolTurnId(event, turnEntries) {
-    const timestamp = parseTimestamp(event.timestamp);
-    if (!timestamp || event.source === "dom-tool-card") return "";
+    const timestamp = toolEventUsageTimestamp(event);
+    if (!timestamp) return "";
     let best = null;
     for (const [id, turn] of turnEntries) {
+      if (!eventConversationMatchesTurn(event, turn)) continue;
       const updatedAt = toCount(turn?.updatedAt);
       if (!updatedAt) continue;
       const distance = Math.abs(updatedAt - timestamp);
@@ -3545,6 +3590,7 @@
       width,
       compact,
     });
+    const layoutFromCandidate = (candidate, compact = false) => layoutFromLeft(candidate.left, candidate.width, compact, candidate.top);
     const topObstacles = obstacleRects
       .map(normalizeRect)
       .filter((rect) => rect && rect.bottom > 0 && rect.top < FLOATING_SCAN_TOP && rect.right > 0 && rect.left < viewportWidth);
@@ -3555,63 +3601,109 @@
       candidate.bottom <= safeViewportHeight;
     const candidateIsClear = (candidate) =>
       candidateFits(candidate) && !topObstacles.some((rect) => rectsOverlap(candidate, rect, FLOATING_SAFE_GAP));
+    const collectRowGaps = (layoutTop, rightLimit = viewportWidth - PANEL_MARGIN) => {
+      const safeRightLimit = Math.min(Math.max(PANEL_MARGIN, rightLimit), viewportWidth - PANEL_MARGIN);
+      if (safeRightLimit <= PANEL_MARGIN) return [];
+
+      const scanRect = {
+        left: PANEL_MARGIN,
+        right: safeRightLimit,
+        top: layoutTop,
+        bottom: layoutTop + safeHeight,
+        width: safeRightLimit - PANEL_MARGIN,
+        height: safeHeight,
+      };
+      const blocked = topObstacles
+        .filter((rect) => rectsOverlap(scanRect, rect, FLOATING_SAFE_GAP))
+        .map((rect) => ({
+          left: Math.max(PANEL_MARGIN, rect.left - FLOATING_SAFE_GAP),
+          right: Math.min(safeRightLimit, rect.right + FLOATING_SAFE_GAP),
+        }))
+        .filter((rect) => rect.right > rect.left)
+        .sort((a, b) => a.left - b.left);
+
+      let cursor = PANEL_MARGIN;
+      const gaps = [];
+      for (const rect of blocked) {
+        if (rect.left > cursor) gaps.push({ left: cursor, right: rect.left });
+        cursor = Math.max(cursor, rect.right);
+      }
+      if (cursor < safeRightLimit) gaps.push({ left: cursor, right: safeRightLimit });
+      return gaps;
+    };
+    const findRightmostClearLayout = (layoutTop, rightLimit = viewportWidth - PANEL_MARGIN) => {
+      const gaps = collectRowGaps(layoutTop, rightLimit).sort((a, b) => b.right - a.right);
+      const pick = (candidateWidth, compact) => {
+        for (const gap of gaps) {
+          if (gap.right - gap.left < candidateWidth) continue;
+          const candidate = {
+            left: gap.right - candidateWidth,
+            right: gap.right,
+            top: layoutTop,
+            bottom: layoutTop + safeHeight,
+            width: candidateWidth,
+            height: safeHeight,
+          };
+          if (candidateIsClear(candidate)) return layoutFromCandidate(candidate, compact);
+        }
+        return null;
+      };
+      return pick(safeWidth, false) || pick(compactWidth, true);
+    };
 
     for (const anchor of preferredAnchors.map(normalizeFloatingAnchor).filter(Boolean)) {
       const layoutTop = clampTop(anchor.rect.top + (anchor.rect.height - safeHeight) / 2);
-      const layoutRight = viewportWidth - anchor.rect.left + anchor.gap;
+      const anchorRightLimit = Math.min(viewportWidth - PANEL_MARGIN, anchor.rect.left - anchor.gap);
+      const layoutRight = viewportWidth - anchorRightLimit;
       const candidate = candidateRectFromRight(layoutRight, layoutTop, safeWidth, safeHeight, viewportWidth);
-      if (candidateFits(candidate) && (anchor.mode === "hard" || candidateIsClear(candidate))) {
-        return layoutFromLeft(candidate.left, safeWidth, false, layoutTop);
+      if (candidateIsClear(candidate)) {
+        return layoutFromCandidate(candidate, false);
       }
       const compactCandidate = candidateRectFromRight(layoutRight, layoutTop, compactWidth, safeHeight, viewportWidth);
-      if (candidateFits(compactCandidate) && (anchor.mode === "hard" || candidateIsClear(compactCandidate))) {
-        return layoutFromLeft(compactCandidate.left, compactWidth, true, layoutTop);
+      if (candidateIsClear(compactCandidate)) {
+        return layoutFromCandidate(compactCandidate, true);
       }
+      const anchoredGapLayout = findRightmostClearLayout(layoutTop, anchorRightLimit);
+      if (anchoredGapLayout) return anchoredGapLayout;
     }
 
     const defaultRight = clampRight(FLOATING_DEFAULT_RIGHT);
     const defaultRect = candidateRectFromRight(defaultRight, top, safeWidth, safeHeight, viewportWidth);
-    if (!topObstacles.some((rect) => rectsOverlap(defaultRect, rect, FLOATING_SAFE_GAP))) {
+    if (candidateIsClear(defaultRect)) {
       return { top, right: defaultRight, left: defaultRect.left, width: safeWidth, compact: false };
     }
 
-    const blocked = topObstacles
-      .map((rect) => ({
-        left: Math.max(PANEL_MARGIN, rect.left - FLOATING_SAFE_GAP),
-        right: Math.min(viewportWidth - PANEL_MARGIN, rect.right + FLOATING_SAFE_GAP),
-      }))
-      .sort((a, b) => a.left - b.left);
-    let cursor = PANEL_MARGIN;
-    const gaps = [];
-    for (const rect of blocked) {
-      if (rect.left > cursor) gaps.push({ left: cursor, right: rect.left });
-      cursor = Math.max(cursor, rect.right);
-    }
-    if (cursor < viewportWidth - PANEL_MARGIN) gaps.push({ left: cursor, right: viewportWidth - PANEL_MARGIN });
-
-    const fullGap = gaps
-      .filter((gap) => gap.right - gap.left >= safeWidth)
-      .sort((a, b) => b.right - a.right)[0];
-    if (fullGap) {
-      return layoutFromLeft(fullGap.right - safeWidth, safeWidth, false);
-    }
-
-    const compactGap = gaps
-      .filter((gap) => gap.right - gap.left >= compactWidth)
-      .sort((a, b) => b.right - a.right)[0];
-    if (compactGap) {
-      return layoutFromLeft(compactGap.right - compactWidth, compactWidth, true);
-    }
+    const clearGapLayout = findRightmostClearLayout(top);
+    if (clearGapLayout) return clearGapLayout;
 
     const fallbackRight = Math.min(Math.max(PANEL_MARGIN, defaultRight), Math.max(PANEL_MARGIN, viewportWidth - PANEL_MARGIN - compactWidth));
     const fallbackRect = candidateRectFromRight(fallbackRight, top, compactWidth, safeHeight, viewportWidth);
     return { top, right: fallbackRight, left: fallbackRect.left, width: compactWidth, compact: true };
   }
 
-  function collectTopObstacleRects() {
+  function isPrimaryTopObstacleNode(node) {
+    return !!node?.matches?.(`button,[role='button'],input,select,textarea,a[href],#${CODEX_PLUS_MENU_ID}`);
+  }
+
+  function findAppHeaderElement() {
+    return (
+      document.querySelector(APP_HEADER_SELECTOR) ||
+      document.querySelector(APP_HEADER_SURFACE_SELECTOR) ||
+      document.querySelector("header")
+    );
+  }
+
+  function isTopChromeObstacleNode(node, style) {
+    if (!node) return false;
+    if (node.id === CODEX_PLUS_MENU_ID || node.closest?.(`#${CODEX_PLUS_MENU_ID}`)) return true;
+    const header = findAppHeaderElement();
+    if (header?.contains?.(node)) return true;
+    return style?.position === "fixed" || style?.position === "sticky";
+  }
+
+  function collectTopObstacleEntries() {
     if (!document.body?.querySelectorAll) return [];
-    const selector = `button,[role='button'],input,select,textarea,#${CODEX_PLUS_MENU_ID},[data-testid]`;
-    return Array.from(document.body.querySelectorAll(selector))
+    const entries = Array.from(document.body.querySelectorAll(TOP_OBSTACLE_SELECTOR))
       .filter((node) => !root?.contains(node) && !panel?.contains(node))
       .map((node) => {
         const rect = normalizeRect(node.getBoundingClientRect?.());
@@ -3620,9 +3712,61 @@
         if (rect.width > innerWidth * 0.85 || rect.height > FLOATING_SCAN_TOP) return null;
         const style = typeof getComputedStyle === "function" ? getComputedStyle(node) : null;
         if (style && (style.display === "none" || style.visibility === "hidden" || style.opacity === "0")) return null;
-        return rect;
+        if (!isTopChromeObstacleNode(node, style)) return null;
+        return { node, rect };
       })
       .filter(Boolean);
+
+    return entries.filter((entry, index) => {
+      if (isPrimaryTopObstacleNode(entry.node)) return true;
+      return !entries.some((other, otherIndex) => {
+        if (otherIndex === index || !entry.node.contains?.(other.node)) return false;
+        if (!rectsOverlap(entry.rect, other.rect)) return false;
+        return other.rect.width <= entry.rect.width && other.rect.height <= entry.rect.height;
+      });
+    });
+  }
+
+  function collectTopObstacleRects() {
+    return collectTopObstacleEntries().map((entry) => entry.rect);
+  }
+
+  function scheduleMountRoot() {
+    if (destroyed || layoutRaf) return;
+    const run = () => {
+      layoutRaf = 0;
+      mountRoot();
+    };
+    layoutRaf = typeof window.requestAnimationFrame === "function" ? window.requestAnimationFrame(run) : window.setTimeout(run, 16);
+  }
+
+  function observeLayoutNode(node) {
+    if (!node || resizeObservedNodes.has(node)) return;
+    if (root?.contains(node) || panel?.contains(node)) return;
+    if (typeof ResizeObserver !== "function") return;
+    if (!resizeObserver) {
+      resizeObserver = new ResizeObserver(() => {
+        scheduleMountRoot();
+      });
+    }
+    try {
+      resizeObserver.observe(node);
+      resizeObservedNodes.add(node);
+    } catch {
+      // 个别节点不可观察时忽略，MutationObserver 仍会兜底。
+    }
+  }
+
+  function updateLayoutResizeObservers(obstacleEntries = []) {
+    observeLayoutNode(document.body);
+    observeLayoutNode(findAppHeaderElement());
+    observeLayoutNode(document.getElementById(CODEX_PLUS_MENU_ID));
+    for (const entry of obstacleEntries) observeLayoutNode(entry.node);
+  }
+
+  function handleWindowResize() {
+    scheduleMountRoot();
+    positionPanel();
   }
 
   function numericCssValue(value) {
@@ -3660,7 +3804,7 @@
   }
 
   function findHeaderToolbarAnchor() {
-    const header = document.querySelector(APP_HEADER_SELECTOR) || document.querySelector("header");
+    const header = findAppHeaderElement();
     if (!header) return null;
     const title = headerTitleRegion(header);
     const toolbarButtons = Array.from(header.querySelectorAll("button"))
@@ -3734,12 +3878,14 @@
     }
     root.dataset.layout = "top-toolbar";
     const rect = root.getBoundingClientRect();
+    const obstacleEntries = collectTopObstacleEntries();
+    updateLayoutResizeObservers(obstacleEntries);
     const layout = resolveFloatingLayout(
       rect.width || FLOATING_MIN_WIDTH,
       rect.height || FLOATING_HEIGHT,
       innerWidth,
       innerHeight,
-      collectTopObstacleRects(),
+      obstacleEntries.map((entry) => entry.rect),
       collectFloatingAnchors()
     );
     root.style.top = `${Math.round(layout.top)}px`;
@@ -3961,10 +4107,16 @@
     if (midnightTimer) window.clearTimeout(midnightTimer);
     if (closeTimer) window.clearTimeout(closeTimer);
     if (shareFeedbackTimer) window.clearTimeout(shareFeedbackTimer);
+    if (layoutRaf) {
+      if (typeof window.cancelAnimationFrame === "function") window.cancelAnimationFrame(layoutRaf);
+      else window.clearTimeout(layoutRaf);
+      layoutRaf = 0;
+    }
     observer?.disconnect();
+    resizeObserver?.disconnect();
     restoreStandaloneCapture();
     document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
-    window.removeEventListener("resize", positionPanel);
+    window.removeEventListener("resize", handleWindowResize);
     root?.remove();
     panel?.remove();
     style?.remove();
@@ -4051,12 +4203,17 @@
     refresh();
 
     observer = new MutationObserver(() => {
-      mountRoot();
+      scheduleMountRoot();
       if (processDomToolCalls()) render({ animate: false });
     });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["aria-hidden", "class", "data-state", "hidden", "style"],
+    });
     document.addEventListener("pointerdown", handleDocumentPointerDown, true);
-    window.addEventListener("resize", positionPanel);
+    window.addEventListener("resize", handleWindowResize);
     pollTimer = window.setInterval(refresh, POLL_INTERVAL_MS);
     scheduleMidnightRefresh();
   }
