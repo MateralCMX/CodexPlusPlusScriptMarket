@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.4.11
+// @version      1.4.12
 // @description  每日 Token 统计，近 5 日滚动存储，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.11";
+  const VERSION = "1.4.12";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
@@ -39,6 +39,74 @@
   const MODEL_BIND_WINDOW_MS = 30 * 60 * 1000;
   const UNKNOWN_MODEL = "Unknown";
   const PRICE_FIELDS = ["input", "cachedInput", "output", "reasoning"];
+  const DEFAULT_OPENAI_PRICE_SOURCE = "OpenAI API Pricing · Standard · USD / 1M tokens";
+  const DEFAULT_OPENAI_MODEL_PRICES = Object.freeze({
+    "gpt-5.6-sol": { input: 5, cachedInput: 0.5, output: 30 },
+    "gpt-5.6-terra": { input: 2.5, cachedInput: 0.25, output: 15 },
+    "gpt-5.6-luna": { input: 1, cachedInput: 0.1, output: 6 },
+    "gpt-5.5": { input: 5, cachedInput: 0.5, output: 30 },
+    "gpt-5.5-pro": { input: 30, output: 180 },
+    "gpt-5.4": { input: 2.5, cachedInput: 0.25, output: 15 },
+    "gpt-5.4-mini": { input: 0.75, cachedInput: 0.075, output: 4.5 },
+    "gpt-5.4-nano": { input: 0.2, cachedInput: 0.02, output: 1.25 },
+    "gpt-5.4-pro": { input: 30, output: 180 },
+    "gpt-5.3-chat-latest": { input: 1.75, cachedInput: 0.175, output: 14 },
+    "gpt-5.2": { input: 1.75, cachedInput: 0.175, output: 14 },
+    "gpt-5.2-pro": { input: 21, output: 168 },
+    "gpt-5.2-chat-latest": { input: 1.75, cachedInput: 0.175, output: 14 },
+    "gpt-5.1": { input: 1.25, cachedInput: 0.125, output: 10 },
+    "gpt-5.1-chat-latest": { input: 1.25, cachedInput: 0.125, output: 10 },
+    "gpt-5": { input: 1.25, cachedInput: 0.125, output: 10 },
+    "gpt-5-chat-latest": { input: 1.25, cachedInput: 0.125, output: 10 },
+    "gpt-5-mini": { input: 0.25, cachedInput: 0.025, output: 2 },
+    "gpt-5-nano": { input: 0.05, cachedInput: 0.005, output: 0.4 },
+    "gpt-5-pro": { input: 15, output: 120 },
+    "gpt-5.3-codex": { input: 1.75, cachedInput: 0.175, output: 14 },
+    "gpt-5.2-codex": { input: 1.75, cachedInput: 0.175, output: 14 },
+    "gpt-5.1-codex-max": { input: 1.25, cachedInput: 0.125, output: 10 },
+    "gpt-5.1-codex": { input: 1.25, cachedInput: 0.125, output: 10 },
+    "gpt-5-codex": { input: 1.25, cachedInput: 0.125, output: 10 },
+    "gpt-5.1-codex-mini": { input: 0.25, cachedInput: 0.025, output: 2 },
+    "codex-mini-latest": { input: 1.5, cachedInput: 0.375, output: 6 },
+    "chat-latest": { input: 5, cachedInput: 0.5, output: 30 },
+    "chatgpt-4o-latest": { input: 5, output: 15 },
+    "gpt-4.1": { input: 2, cachedInput: 0.5, output: 8 },
+    "gpt-4.1-mini": { input: 0.4, cachedInput: 0.1, output: 1.6 },
+    "gpt-4.1-nano": { input: 0.1, cachedInput: 0.025, output: 0.4 },
+    "gpt-4o": { input: 2.5, cachedInput: 1.25, output: 10 },
+    "gpt-4o-2024-05-13": { input: 5, output: 15 },
+    "gpt-4o-mini": { input: 0.15, cachedInput: 0.075, output: 0.6 },
+    o1: { input: 15, cachedInput: 7.5, output: 60 },
+    "o1-pro": { input: 150, output: 600 },
+    "o3-pro": { input: 20, output: 80 },
+    o3: { input: 2, cachedInput: 0.5, output: 8 },
+    "o4-mini": { input: 1.1, cachedInput: 0.275, output: 4.4 },
+    "o3-mini": { input: 1.1, cachedInput: 0.55, output: 4.4 },
+    "o1-mini": { input: 1.1, cachedInput: 0.55, output: 4.4 },
+    "gpt-4-turbo-2024-04-09": { input: 10, output: 30 },
+    "gpt-4-0125-preview": { input: 10, output: 30 },
+    "gpt-4-1106-preview": { input: 10, output: 30 },
+    "gpt-4-1106-vision-preview": { input: 10, output: 30 },
+    "gpt-4-0613": { input: 30, output: 60 },
+    "gpt-4-0314": { input: 30, output: 60 },
+    "gpt-4-32k": { input: 60, output: 120 },
+    "gpt-3.5-turbo": { input: 0.5, output: 1.5 },
+    "gpt-3.5-turbo-0125": { input: 0.5, output: 1.5 },
+    "gpt-3.5-turbo-1106": { input: 1, output: 2 },
+    "gpt-3.5-turbo-0613": { input: 1.5, output: 2 },
+    "gpt-3.5-0301": { input: 1.5, output: 2 },
+    "gpt-3.5-turbo-instruct": { input: 1.5, output: 2 },
+    "gpt-3.5-turbo-16k-0613": { input: 3, output: 4 },
+    "davinci-002": { input: 2, output: 2 },
+    "babbage-002": { input: 0.4, output: 0.4 },
+    "gpt-5.5-cyber": { input: 12.5, cachedInput: 1.25, output: 75 },
+    "gpt-5-search-api": { input: 1.25, cachedInput: 0.125, output: 10 },
+    "gpt-4o-search-preview": { input: 2.5, output: 10 },
+    "gpt-4o-mini-search-preview": { input: 0.15, output: 0.6 },
+    "o3-deep-research": { input: 10, cachedInput: 2.5, output: 40 },
+    "o4-mini-deep-research": { input: 2, cachedInput: 0.5, output: 8 },
+    "computer-use-preview": { input: 3, output: 12 },
+  });
   const FLOATING_TOP = 2;
   const FLOATING_DEFAULT_RIGHT = 280;
   const FLOATING_SAFE_GAP = 8;
@@ -587,6 +655,24 @@
     return PRICE_FIELDS.every((field) => normalized[field] == null);
   }
 
+  function defaultModelPrice(model) {
+    const normalized = normalizeModelName(model);
+    const lookup = normalized.replace(/\s+\([^)]*\)\s*$/, "").toLowerCase();
+    const entry = normalized
+      ? DEFAULT_OPENAI_MODEL_PRICES[normalized] || DEFAULT_OPENAI_MODEL_PRICES[lookup]
+      : null;
+    return entry ? normalizePriceEntry(entry) : null;
+  }
+
+  function mergePriceEntries(base, override) {
+    const merged = normalizePriceEntry(base);
+    const custom = normalizePriceEntry(override);
+    for (const field of PRICE_FIELDS) {
+      if (custom[field] != null) merged[field] = custom[field];
+    }
+    return isPriceEntryEmpty(merged) ? null : merged;
+  }
+
   function loadPriceConfig() {
     try {
       const parsed = JSON.parse(localStorage.getItem(PRICE_STORAGE_KEY) || "null");
@@ -615,9 +701,24 @@
     }
   }
 
-  function getModelPrice(model) {
+  function getModelPriceInfo(model) {
     const normalized = normalizeModelName(model);
-    return normalized ? priceConfig.models[normalized] || null : null;
+    if (!normalized) return { price: null, source: "none", hasCustom: false, hasDefault: false };
+    const custom = normalizePriceEntry(priceConfig.models[normalized]);
+    const defaultPrice = defaultModelPrice(normalized);
+    const hasCustom = !isPriceEntryEmpty(custom);
+    const hasDefault = !isPriceEntryEmpty(defaultPrice);
+    const price = mergePriceEntries(defaultPrice, custom);
+    return {
+      price,
+      source: hasCustom ? "custom" : hasDefault ? "default" : "none",
+      hasCustom,
+      hasDefault,
+    };
+  }
+
+  function getModelPrice(model) {
+    return getModelPriceInfo(model).price;
   }
 
   function setModelPrice(model, entry) {
@@ -996,6 +1097,8 @@
         updatedAt: 0,
         cost: 0,
         pricedModels: 0,
+        customPricedModels: 0,
+        defaultPricedModels: 0,
         modelsByName: {},
         models: [],
         toolCallsByKey: {},
@@ -1016,13 +1119,19 @@
     );
     summary.models = Object.values(summary.modelsByName)
       .map((modelSummary) => {
-        const costInfo = calculateUsageCost(modelSummary, getModelPrice(modelSummary.model));
+        const priceInfo = getModelPriceInfo(modelSummary.model);
+        const costInfo = calculateUsageCost(modelSummary, priceInfo.price);
         summary.cost += costInfo.cost;
-        if (costInfo.configured) summary.pricedModels += 1;
+        if (costInfo.configured) {
+          summary.pricedModels += 1;
+          if (priceInfo.source === "custom") summary.customPricedModels += 1;
+          else if (priceInfo.source === "default") summary.defaultPricedModels += 1;
+        }
         return {
           ...modelSummary,
           cost: costInfo.cost,
           priced: costInfo.configured,
+          priceSource: costInfo.configured ? priceInfo.source : "none",
         };
       })
       .sort((a, b) => b.total - a.total || a.model.localeCompare(b.model));
@@ -2969,6 +3078,10 @@
         font-size: 11px;
         font-weight: 600;
       }
+      #${PANEL_ID} .codex-daily-price-clear:disabled {
+        cursor: default;
+        opacity: 0.55;
+      }
       #${PANEL_ID} .codex-daily-price-list {
         display: grid;
         gap: 9px;
@@ -2978,7 +3091,7 @@
       }
       #${PANEL_ID} .codex-daily-price-row {
         display: grid;
-        grid-template-columns: minmax(0, 1fr) auto;
+        grid-template-columns: minmax(0, 1fr) auto auto;
         gap: 6px;
         padding-bottom: 9px;
         border-bottom: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.13));
@@ -2994,6 +3107,20 @@
         white-space: nowrap;
         font-size: 11px;
         font-weight: 650;
+      }
+      #${PANEL_ID} .codex-daily-price-badge {
+        justify-self: end;
+        align-self: center;
+        padding: 2px 6px;
+        border-radius: 999px;
+        color: #2676d9;
+        background: rgba(59, 167, 255, 0.12);
+        font-size: 10px;
+        font-weight: 700;
+      }
+      #${PANEL_ID} .codex-daily-price-badge.is-custom {
+        color: #7652e5;
+        background: rgba(141, 107, 255, 0.13);
       }
       #${PANEL_ID} .codex-daily-price-grid {
         grid-column: 1 / -1;
@@ -3182,7 +3309,7 @@
             <span class="codex-daily-section-title">Model 价格设置</span>
             <span class="codex-daily-section-meta">USD / 1M tokens</span>
           </div>
-          <div class="codex-daily-price-help">缓存输入留空按输入价计算；推理 Token 留空按输出价计算。价格只用于本地估算，不代表官方账单。</div>
+          <div class="codex-daily-price-help">内置 OpenAI API Pricing 的 Standard 参考价，单位 USD / 1M tokens；有上下文分档的模型按短上下文价预置。用户输入会覆盖预置字段。Cache writes、工具调用按次费用、Batch/Flex/Priority 不纳入估算。价格只用于本地估算，不代表官方账单。</div>
           <div class="codex-daily-price-add">
             <input class="codex-daily-price-model-input" type="text" placeholder="添加 Model，例如 gpt-5.5" aria-label="添加 Model 名称">
             <button class="codex-daily-price-add-button" type="button" data-action="add-price-model">添加</button>
@@ -3304,7 +3431,10 @@
     const list = panel.querySelector(".codex-daily-model-list");
     const meta = panel.querySelector('[data-field="modelMeta"]');
     if (meta) {
-      const pricedText = snapshot.pricedModels > 0 ? `${snapshot.pricedModels} 个 Model 已定价` : "暂无定价";
+      const sourceParts = [];
+      if (snapshot.customPricedModels) sourceParts.push(`${snapshot.customPricedModels} 个自定义`);
+      if (snapshot.defaultPricedModels) sourceParts.push(`${snapshot.defaultPricedModels} 个预置参考价`);
+      const pricedText = snapshot.pricedModels > 0 ? sourceParts.join(" · ") || `${snapshot.pricedModels} 个 Model 已定价` : "暂无定价";
       meta.textContent = `${formatCost(snapshot.cost)} · ${pricedText}`;
     }
     if (!list) return;
@@ -3317,9 +3447,10 @@
         const row = document.createElement("div");
         row.className = "codex-daily-model-row";
         const percent = Math.max(4, Math.min(100, (toCount(item.total) / maxTotal) * 100));
+        const priceTitle = item.priceSource === "default" ? DEFAULT_OPENAI_PRICE_SOURCE : item.priceSource === "custom" ? "用户自定义价格" : "未配置价格";
         row.innerHTML = `
           <span class="codex-daily-model-name" title="${escapeHtml(item.model)}">${escapeHtml(item.model)}</span>
-          <span class="codex-daily-model-cost">${item.priced ? formatCost(item.cost) : "未定价"}</span>
+          <span class="codex-daily-model-cost" title="${escapeAttribute(priceTitle)}">${item.priced ? formatCost(item.cost) : "未定价"}</span>
           <span class="codex-daily-model-bar" title="${formatExact(item.total)} Token">
             <span class="codex-daily-model-fill" style="width: ${percent.toFixed(1)}%"></span>
           </span>
@@ -3402,17 +3533,23 @@
     }
     list.replaceChildren(
       ...models.map((model) => {
-        const entry = normalizePriceEntry(priceConfig.models[model]);
+        const customEntry = normalizePriceEntry(priceConfig.models[model]);
+        const defaultEntry = defaultModelPrice(model);
+        const priceInfo = getModelPriceInfo(model);
+        const badgeText = priceInfo.hasCustom ? "自定义" : priceInfo.hasDefault ? "预置" : "未定价";
+        const clearLabel = priceInfo.hasCustom ? (priceInfo.hasDefault ? "恢复预置" : "清除") : priceInfo.hasDefault ? "预置" : "清除";
+        const clearDisabled = priceInfo.hasCustom ? "" : " disabled";
         const row = document.createElement("div");
         row.className = "codex-daily-price-row";
         row.innerHTML = `
           <span class="codex-daily-price-name" title="${escapeHtml(model)}">${escapeHtml(model)}</span>
-          <button class="codex-daily-price-clear" type="button" data-action="clear-price-model" data-model="${escapeAttribute(model)}">清除</button>
+          <span class="codex-daily-price-badge ${priceInfo.hasCustom ? "is-custom" : ""}" title="${escapeAttribute(priceInfo.hasCustom && priceInfo.hasDefault ? "用户自定义价格；空字段使用预置参考价" : priceInfo.hasCustom ? "用户自定义价格" : priceInfo.hasDefault ? DEFAULT_OPENAI_PRICE_SOURCE : "未配置价格")}">${badgeText}</span>
+          <button class="codex-daily-price-clear" type="button" data-action="clear-price-model" data-model="${escapeAttribute(model)}"${clearDisabled}>${clearLabel}</button>
           <div class="codex-daily-price-grid">
-            ${priceInputHtml(model, "input", "输入", entry.input)}
-            ${priceInputHtml(model, "cachedInput", "缓存", entry.cachedInput)}
-            ${priceInputHtml(model, "output", "输出", entry.output)}
-            ${priceInputHtml(model, "reasoning", "推理", entry.reasoning)}
+            ${priceInputHtml(model, "input", "输入", customEntry.input, defaultEntry?.input)}
+            ${priceInputHtml(model, "cachedInput", "缓存", customEntry.cachedInput, defaultEntry?.cachedInput)}
+            ${priceInputHtml(model, "output", "输出", customEntry.output, defaultEntry?.output)}
+            ${priceInputHtml(model, "reasoning", "推理", customEntry.reasoning, defaultEntry?.reasoning)}
           </div>
         `;
         return row;
@@ -3420,12 +3557,12 @@
     );
   }
 
-  function priceInputHtml(model, field, label, value) {
+  function priceInputHtml(model, field, label, value, placeholderValue = null) {
     return `
       <label class="codex-daily-price-field">
         <span>${label}</span>
         <input class="codex-daily-price-input" type="number" min="0" step="0.000001" inputmode="decimal"
-          data-model="${escapeAttribute(model)}" data-field="${field}" value="${escapeAttribute(formatPriceInputValue(value))}">
+          data-model="${escapeAttribute(model)}" data-field="${field}" value="${escapeAttribute(formatPriceInputValue(value))}" placeholder="${escapeAttribute(formatPriceInputValue(placeholderValue))}">
       </label>
     `;
   }
@@ -4142,6 +4279,7 @@
     createShareBlob,
     copyShareImage,
     getModelPrices: () => JSON.parse(JSON.stringify(priceConfig.models)),
+    getDefaultModelPrices: () => JSON.parse(JSON.stringify(DEFAULT_OPENAI_MODEL_PRICES)),
     setModelPrice,
     clearModelPrice,
     resetToday,
@@ -4158,6 +4296,8 @@
       recordToolCall,
       extractDomToolCallEvents,
       processDomToolCalls,
+      defaultModelPrice,
+      getModelPriceInfo,
       calculateUsageCost,
       formatCost,
       getDateKey,
