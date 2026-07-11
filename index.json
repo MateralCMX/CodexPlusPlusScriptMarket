@@ -139,19 +139,17 @@
       "id": "codex-live-token-cost",
       "name": "Codex Live Token Cost",
       "description": "在输入框上方显示 token 和费用，解锁本地 Profile 统计，可选 helper 同步 CC Switch。",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "author": "Tianzora",
       "tags": [
         "codex",
         "tokens",
         "cost",
-        "profile",
-        "helper",
-        "cc-switch"
+        "usage"
       ],
       "homepage": "https://github.com/Tianzora/codex-token-cost",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-live-token-cost.js",
-      "sha256": "a52a5afd60e4975f469f8d07c4fa7c8fc4d939405467eacf8da982ec1bc87d75"
+      "sha256": "0824294c3ddaca309e8d7c6d696e20cffd862759809c482fc6cf919e83cb3d7d"
     }
   ]
 }
