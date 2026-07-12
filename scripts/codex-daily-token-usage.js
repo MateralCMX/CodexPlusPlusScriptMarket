@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.4.12
+// @version      1.4.13
 // @description  每日 Token 统计，近 5 日滚动存储，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.12";
+  const VERSION = "1.4.13";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
@@ -2870,17 +2870,21 @@
         filter: drop-shadow(0 0 4px rgba(82, 124, 255, 0.42));
       }
       #${PANEL_ID} .codex-daily-trend-tooltip {
+        --codex-daily-trend-tooltip-bg: rgba(255, 255, 255, 0.96);
+        --codex-daily-trend-tooltip-border: rgba(15, 23, 42, 0.14);
+        --codex-daily-trend-tooltip-fg: #202020;
+        --codex-daily-trend-tooltip-muted: #62666d;
         position: absolute;
         z-index: 5;
         width: max-content;
         min-width: 158px;
         max-width: 210px;
         padding: 9px 10px;
-        border: 1px solid color-mix(in srgb, var(--color-token-border, rgba(127, 127, 127, 0.18)) 82%, transparent);
+        border: 1px solid var(--codex-daily-trend-tooltip-border);
         border-radius: 11px;
-        background: color-mix(in srgb, var(--color-token-background, #fff) 94%, transparent);
+        background: var(--codex-daily-trend-tooltip-bg);
         box-shadow: 0 10px 28px rgba(0, 0, 0, 0.16);
-        color: var(--color-token-foreground, #202020);
+        color: var(--codex-daily-trend-tooltip-fg);
         font-size: 11px;
         line-height: 1.35;
         pointer-events: none;
@@ -2898,10 +2902,10 @@
         justify-content: space-between;
         gap: 14px;
         margin-top: 3px;
-        color: var(--color-token-foreground-secondary, #737373);
+        color: var(--codex-daily-trend-tooltip-muted);
       }
       #${PANEL_ID} .codex-daily-trend-tooltip-row strong {
-        color: var(--color-token-foreground, #202020);
+        color: var(--codex-daily-trend-tooltip-fg);
         font-weight: 700;
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
@@ -4314,6 +4318,7 @@
       buildTrendData,
       trendPoints,
       trendPath,
+      trendTooltipHtml,
       buildShareModel,
       resolveFloatingLayout,
       rectsOverlap,
