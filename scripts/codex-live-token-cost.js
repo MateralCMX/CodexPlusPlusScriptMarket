@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Live Token Cost
 // @namespace    codex-plus-plus
-// @version      0.7.0
+// @version      0.7.1
 // @description  在 Codex 输入框上方显示 Token 与金额，解锁官方个人资料页并替换为本地统计；通过设置按钮管理价格和伪装资料。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.7.0";
+  const VERSION = "0.7.1";
   const ROOT_ID = "codex-live-token-cost";
   const SETTINGS_BUTTON_ID = "codex-live-token-cost-settings";
   const STYLE_ID = "codex-live-token-cost-style";
@@ -56,11 +56,19 @@
   const LOCAL_LIVE_TURN_RESTORE_MAX_AGE_MS = 15 * 60 * 1000;
   const UNKNOWN_MODEL = "未知";
   const FAST_MODE_ICON_PATH =
-    "M9.80999 17.8302C9.49666 18.1969 9.08999 18.3869 8.58999 18.4002C8.09666 18.4136 7.69666 18.2436 7.38999 17.8902C7.08999 17.5436 7.02666 17.0636 7.19999 16.4502L8.06999 13.2902H3.89999C3.43333 13.2902 3.06999 13.1602 2.80999 12.9002C2.55666 12.6336 2.42999 12.3136 2.42999 11.9402C2.42999 11.5602 2.55666 11.2169 2.80999 10.9102L10.16 2.18022C10.4733 1.81356 10.8767 1.62356 11.37 1.61022C11.87 1.59689 12.27 1.76689 12.57 2.12022C12.8767 2.47356 12.9433 2.95356 12.77 3.56023L11.87 6.78023H16.05C16.51 6.78023 16.87 6.91356 17.13 7.18023C17.3967 7.44023 17.53 7.76023 17.53 8.14023C17.53 8.52023 17.4 8.86023 17.14 9.16023L9.80999 17.8302ZM15.89 8.50023C15.93 8.44689 15.95 8.39356 15.95 8.34023C15.9567 8.28689 15.94 8.24356 15.9 8.21023C15.86 8.17023 15.8033 8.15023 15.73 8.15023H11.1C10.9133 8.15023 10.7533 8.10356 10.62 8.01023C10.4933 7.91689 10.4067 7.79023 10.36 7.63023C10.3133 7.47023 10.3167 7.29023 10.37 7.09023L11.33 3.62022C11.3567 3.52022 11.3467 3.44356 11.3 3.39022C11.2533 3.33022 11.19 3.30356 11.11 3.31022C11.0367 3.31689 10.9733 3.35356 10.92 3.42023L4.04999 11.5702C4.00999 11.6236 3.98666 11.6769 3.97999 11.7302C3.97999 11.7836 3.99999 11.8269 4.03999 11.8602C4.07999 11.8936 4.13999 11.9102 4.21999 11.9102H8.78999C9.00333 11.9102 9.17666 11.9569 9.30999 12.0502C9.44999 12.1436 9.54333 12.2736 9.58999 12.4402C9.63666 12.6002 9.63333 12.7802 9.57999 12.9802L8.63999 16.3902C8.61333 16.4902 8.62333 16.5702 8.66999 16.6302C8.71666 16.6836 8.77666 16.7069 8.84999 16.7002C8.92999 16.6936 8.99666 16.6602 9.04999 16.6002L15.89 8.50023Z";
+    "M11.9125 21.4125C11.5292 21.8625 11.0292 22.0958 10.4125 22.1125C9.79586 22.1291 9.29586 21.9208 8.91252 21.4875C8.53752 21.0541 8.45836 20.4541 8.67503 19.6875L9.68752 16H4.57502C4.00836 16 3.56669 15.8375 3.25002 15.5125C2.93336 15.1791 2.77502 14.7791 2.77502 14.3125C2.77502 13.8375 2.92919 13.4125 3.23752 13.0375L12.1375 2.47497C12.5209 2.02497 13.0209 1.79164 13.6375 1.77497C14.2542 1.75831 14.75 1.96664 15.125 2.39997C15.5084 2.83331 15.5917 3.43331 15.375 4.19997L14.3125 7.99998H19.425C19.9917 7.99998 20.4334 8.16664 20.75 8.49997C21.075 8.83331 21.2375 9.23748 21.2375 9.71247C21.2375 10.1791 21.0792 10.5958 20.7625 10.9625L11.9125 21.4125Z";
+  const LEGACY_FAST_MODE_ICON_PATH_PREFIX = "M9.80999 17.8302C9.49666 18.1969";
   const RENDER_THROTTLE_MS = 250;
+  const SETTINGS_MODAL_EXIT_MS = 160;
+  const PROFILE_SAVE_STATUS_DURATION_MS = 1800;
   const HELPER_STATS_URL = "http://127.0.0.1:17888/stats";
   const HELPER_STATS_REFRESH_URL = `${HELPER_STATS_URL}?refresh=1`;
   const CC_SWITCH_TURNS_URL = "http://127.0.0.1:17888/cc-switch/turns";
+  const CC_SWITCH_TURNS_REFRESH_URL = `${CC_SWITCH_TURNS_URL}?refresh=1`;
+  const PROFILE_DATA_REFRESH_MIN_INTERVAL_MS = 60000;
+  const HELPER_REFRESH_POLL_INTERVAL_MS = 500;
+  const HELPER_REFRESH_MAX_POLLS = 60;
+  const HELPER_BRIDGE_RETRY_DELAYS_MS = [0, 250, 1000];
   const HELPER_THREAD_CONTENT_URL = "http://127.0.0.1:17888/codex/thread-content";
   const HELPER_GITHUB_URL = "https://github.com/Tianzora/codex-token-cost/blob/main/scripts/codex-local-usage-helper.cjs";
   const HELPER_STATUS_DEFAULT = "Helper 可选：未连接时使用本地捕获数据；CC Switch 同步、Codex SQLite 线程数、技能/插件统计会不可用。";
@@ -206,6 +214,7 @@
     root: null,
     settingsButton: null,
     settingsOverlay: null,
+    settingsOverlayCloseTimer: 0,
     started: false,
     startedAt: Date.now(),
     renderTimer: 0,
@@ -258,6 +267,11 @@
     flatpickrPromise: null,
     badProfileImageUrl: "",
     profilePrefs: null,
+    profileSaveStatus: "",
+    profileSaveStatusTone: "",
+    profileSaveStatusTimer: 0,
+    profileQueryClient: null,
+    profileAccountsRefreshPromise: null,
     profileIdentitySyncTimer: 0,
     profileIdentityObserver: null,
     profileUsageRefreshTimer: 0,
@@ -274,6 +288,9 @@
     helperStats: null,
     helperStatsSignature: "",
     helperStatsAt: 0,
+    profileDataRefreshAttemptAt: 0,
+    profileDataRefreshAt: 0,
+    profileDataRefreshPromise: null,
     helperStatus: HELPER_STATUS_DEFAULT,
     helperUnavailable: false,
     helperCheckedAt: 0,
@@ -282,8 +299,13 @@
     helperThreadContent: new Map(),
     helperThreadContentInFlight: new Set(),
     ccSwitchSyncInFlight: false,
+    ccSwitchSyncPromise: null,
     ccSwitchStartupSyncStarted: false,
     ccSwitchSyncStatus: "",
+    settingsStatusPulseFrame: 0,
+    settingsFocusFrame: 0,
+    analyticsRangeSwitchFrame: 0,
+    analyticsRangeSwitchTimer: 0,
     hubValueCache: new Map(),
     hubSkeletonVersion: "",
     shimmerDelayTimer: 0,
@@ -704,7 +726,7 @@
       __codexLiveTokenCostProfileAuthLocal: VERSION,
       openAIAuth: "chatgpt",
       authMethod: "chatgpt",
-      requiresAuth: false,
+      requiresAuth: true,
       planAtLogin: account.planType,
       account,
       accountId: source.accountId || LOCAL_PROFILE_ACCOUNT_ID,
@@ -716,12 +738,32 @@
     };
   }
 
+  function isProfileQueryClient(value) {
+    return Boolean(value && typeof value.invalidateQueries === "function" && typeof value.getQueryCache === "function");
+  }
+
+  function rememberProfileQueryClient(value) {
+    if (isProfileQueryClient(value)) state.profileQueryClient = value;
+    return value;
+  }
+
+  function profileQueryClientFromFiberNode(node) {
+    if (!node || typeof node !== "object") return null;
+    const fiberKey = Object.keys(node).find((key) => key.startsWith("__reactFiber$") || key.startsWith("__reactInternalInstance$"));
+    for (let fiber = fiberKey ? node[fiberKey] : null; fiber; fiber = fiber.return) {
+      const queryClient = fiber.memoizedProps?.value;
+      if (isProfileQueryClient(queryClient)) return queryClient;
+    }
+    return null;
+  }
+
   function patchProfileReactAuthContext(react, authContext) {
     if (!react || typeof react.useContext !== "function" || !authContext) return false;
     if (react.useContext.__codexLiveTokenCostProfileAuthPatch === VERSION) return true;
     const originalUseContext = react.__codexLiveTokenCostOriginalUseContext || react.useContext.bind(react);
     react.useContext = function codexLiveTokenCostProfileUseContext(context) {
       const value = originalUseContext(context);
+      rememberProfileQueryClient(value);
       if (context === authContext) return spoofProfileAuthContextValue(value);
       return value;
     };
@@ -787,7 +829,7 @@
     const text = normalizeText(value, 500);
     const raw = text.match(/\b(gpt-[a-z0-9._-]+|o\d[a-z0-9._-]*)\b/i)?.[1] || "";
     if (!raw) return { model: "", effort: "" };
-    const split = raw.match(/^(.*?)[._\s-]+(minimal|low|medium|high)$/i);
+    const split = raw.match(/^(.*?)[._\s-]+(minimal|low|medium|high|xhigh|ultra|max)$/i);
     if (split) return { model: split[1], effort: split[2].toLowerCase() };
     return { model: raw, effort: "" };
   }
@@ -812,6 +854,7 @@
       xhigh: "xhigh",
       max: "max",
       maximum: "max",
+      ultra: "ultra",
     }[text] || {
       none: "none",
       minimal: "minimal",
@@ -822,6 +865,7 @@
       xhigh: "xhigh",
       max: "max",
       maximum: "max",
+      ultra: "ultra",
     }[lower];
     return mapped || "";
   }
@@ -847,20 +891,26 @@
       const custom = candidate.match(/\b[a-z][a-z0-9._-]*(?:[._-][a-z0-9]+)+\b/i)?.[0] || candidate.match(/\b[a-z][a-z0-9._-]*\d[a-z0-9._-]*\b/i)?.[0] || "";
       if (custom && !normalizeOfficialEffort(custom)) model = custom.toLowerCase();
     }
-    const effort = normalizeOfficialEffort(effortValue) || parsed.effort || normalizeOfficialEffort(text.match(/(高|中|低|最小|无|\bminimal\b|\blow\b|\bmedium\b|\bhigh\b)/i)?.[1]);
+    const effort = normalizeOfficialEffort(effortValue) || parsed.effort || normalizeOfficialEffort(text.match(/(高|中|低|最小|无|\bminimal\b|\blow\b|\bmedium\b|\bhigh\b|\bxhigh\b|\bultra\b|\bmax\b)/i)?.[1]);
     return { model, effort };
   }
 
   function officialFastModeIconHtml() {
-    return `<svg class="cltc-fast-mode-icon" data-cltc-fast-mode-icon="true" hidden width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="${FAST_MODE_ICON_PATH}" fill="currentColor"></path></svg>`;
+    return `<svg class="cltc-fast-mode-icon" data-cltc-fast-mode-icon="true" hidden width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="${FAST_MODE_ICON_PATH}" fill="currentColor"></path></svg>`;
   }
 
   function officialTriggerFastMode(trigger) {
     if (!trigger || state.root?.contains?.(trigger) || state.settingsOverlay?.contains?.(trigger)) return false;
     const paths = Array.from(trigger.querySelectorAll?.("svg path") || []);
     return paths.some((path) => {
-      if (!(path.getAttribute?.("d") || "").startsWith("M9.80999 17.8302")) return false;
       const svg = path.closest?.("svg");
+      const pathData = path.getAttribute?.("d") || "";
+      const className = String(svg?.className?.baseVal || svg?.className || "");
+      const isFastIcon =
+        pathData === FAST_MODE_ICON_PATH ||
+        pathData.startsWith(LEGACY_FAST_MODE_ICON_PATH_PREFIX) ||
+        /(?:^|_)WorkTriggerInlineFastIcon(?:_|$)/.test(className);
+      if (!isFastIcon) return false;
       if (!svg || svg.hidden || svg.hasAttribute?.("hidden") || svg.closest?.("[hidden]")) return false;
       const rect = svg.getBoundingClientRect?.();
       const style = typeof getComputedStyle === "function" ? getComputedStyle(svg) : null;
@@ -1744,47 +1794,18 @@
       .filter((item) => normalizeUsage(item?.usage).exact && !isTransientSessionKey(turnSessionKey(item)));
     const retained = trimLocalLedger(exact);
     const retainedSet = new Set(retained);
-    const ccImportedAtByDate = new Map();
-    for (const turn of exact) {
-      const source = normalizeText(turn?.source, 80);
-      const importSource = normalizeText(turn?.importSource, 80);
-      if (source !== "cc-switch" && importSource !== "cc-switch") continue;
-      const date = localDateKey(turnTimestampMs(turn));
-      ccImportedAtByDate.set(date, Math.max(toCount(ccImportedAtByDate.get(date)), toCount(turn.importedAt || turn.observedAt || turn.createdAt)));
-    }
     const evicted = exact.filter((turn) => {
       const source = normalizeText(turn?.source, 80);
       const importSource = normalizeText(turn?.importSource, 80);
       return source !== "cc-switch" && importSource !== "cc-switch" && !retainedSet.has(turn);
     });
-    const uncovered = evicted.filter((turn) => {
-      const importedAt = toCount(ccImportedAtByDate.get(localDateKey(turnTimestampMs(turn))));
-      return !importedAt || turnTimestampMs(turn) >= importedAt;
-    });
     return {
       turns: retained,
-      archive: mergeLocalUsageArchive(archive, uncovered),
+      archive: mergeLocalUsageArchive(archive, evicted),
       evicted: evicted.length,
-      archived: uncovered.length,
-      dates: Array.from(new Set(uncovered.map((turn) => localDateKey(turnTimestampMs(turn))).filter(Boolean))),
+      archived: evicted.length,
+      dates: Array.from(new Set(evicted.map((turn) => localDateKey(turnTimestampMs(turn))).filter(Boolean))),
     };
-  }
-
-  function removeLocalUsageArchiveDates(dates) {
-    const targets = new Set((Array.isArray(dates) ? dates : [dates]).map((date) => normalizeText(date, 10)).filter(Boolean));
-    if (!targets.size) return false;
-    const archive = normalizeLocalUsageArchive(state.localUsageArchive);
-    let changed = false;
-    for (const date of targets) {
-      if (!archive.days[date]) continue;
-      delete archive.days[date];
-      changed = true;
-    }
-    if (changed) {
-      archive.updatedAt = Date.now();
-      state.localUsageArchive = archive;
-    }
-    return changed;
   }
 
   function importLocalUsageTurns(rows, options = {}) {
@@ -1796,7 +1817,6 @@
     const byId = new Map(existing.map((turn) => [turn.turnId, turn]));
     let imported = 0;
     let skipped = 0;
-    const importedDates = new Set();
     items.forEach((row, index) => {
       const turn = normalizeImportedUsageTurn(row, index, { importedAt });
       if (!turn) {
@@ -1804,13 +1824,11 @@
         return;
       }
       byId.set(turn.turnId, turn);
-      if (replaceSource === "cc-switch") importedDates.add(localDateKey(turnTimestampMs(turn)));
       imported++;
     });
     state.localLedger = Array.from(byId.values()).sort(
       (a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")) || String(a.turnId || "").localeCompare(String(b.turnId || "")),
     );
-    if (replaceSource === "cc-switch") removeLocalUsageArchiveDates(Array.from(importedDates));
     state.localLast = state.localLedger[state.localLedger.length - 1] || null;
     saveLocalLedger();
     if (replaceSource) rebuildAnalyticsRollup();
@@ -2606,7 +2624,7 @@
     if (!text) return "";
     if (text === "extra_high" || text === "extra" || text === "very_high") return "xhigh";
     if (text === "maximum") return "max";
-    if (["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(text)) return text;
+    if (["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].includes(text)) return text;
     return text.slice(0, 60);
   }
 
@@ -3344,21 +3362,38 @@
 
   function analyticsVisibleTurns(turns) {
     const items = (Array.isArray(turns) ? turns : []).filter((turn) => normalizeUsage(turn?.usage).exact);
-    const ccImportedAtByDate = new Map();
+    const groups = new Map();
     for (const turn of items) {
-      const source = normalizeText(turn?.source, 80);
-      const importSource = normalizeText(turn?.importSource, 80);
-      if (source !== "cc-switch" && importSource !== "cc-switch") continue;
       const date = localDateKey(turnTimestampMs(turn));
-      ccImportedAtByDate.set(date, Math.max(toTimestampMs(ccImportedAtByDate.get(date)), toTimestampMs(turn?.importedAt ?? turn?.observedAt ?? turn?.createdAt)));
-    }
-    return items.filter((turn) => {
+      const model = normalizeText(turn?.model, 120) || UNKNOWN_MODEL;
+      const key = `${date}\u0001${model}`;
       const source = normalizeText(turn?.source, 80);
       const importSource = normalizeText(turn?.importSource, 80);
-      if (source === "cc-switch" || importSource === "cc-switch" || source !== "codex-live-token-cost") return true;
-      const importedAt = toTimestampMs(ccImportedAtByDate.get(localDateKey(turnTimestampMs(turn))));
-      return !importedAt || turnTimestampMs(turn) >= importedAt;
-    });
+      const isCcSwitch = source === "cc-switch" || importSource === "cc-switch";
+      const group = groups.get(key) || {
+        local: [],
+        ccSwitch: [],
+        localBucket: emptyDailyUsageBucket(date),
+        ccBucket: emptyDailyUsageBucket(date),
+      };
+      if (isCcSwitch) {
+        group.ccSwitch.push(turn);
+        addTurnToDailyBucket(group.ccBucket, turn, normalizeUsage(turn.usage));
+      } else {
+        group.local.push(turn);
+        addTurnToDailyBucket(group.localBucket, turn, normalizeUsage(turn.usage));
+      }
+      groups.set(key, group);
+    }
+    const visible = items.slice(0, 0);
+    for (const group of groups.values()) {
+      if (group.ccSwitch.length && group.local.length) {
+        visible.push(...(group.ccBucket.tokens >= group.localBucket.tokens ? group.ccSwitch : group.local));
+      } else {
+        visible.push(...group.ccSwitch, ...group.local);
+      }
+    }
+    return visible;
   }
 
   function analyticsTurnTimestampMs(turn) {
@@ -3906,6 +3941,19 @@
     return target;
   }
 
+  function maxDailyBucket(target, source) {
+    const targetHasUsage = toCount(target?.tokens) > 0 || toCount(target?.input) > 0 || toCount(target?.output) > 0 || toCount(target?.cached) > 0;
+    const sourceWins = !targetHasUsage || toCount(source?.tokens) > toCount(target?.tokens) || Number(source?.cost) > Number(target?.cost);
+    target.tokens = Math.max(toCount(target.tokens), toCount(source?.tokens));
+    target.input = Math.max(toCount(target.input), toCount(source?.input));
+    target.output = Math.max(toCount(target.output), toCount(source?.output));
+    target.cached = Math.max(toCount(target.cached), toCount(source?.cached));
+    target.requests = Math.max(toCount(target.requests), toCount(source?.requests));
+    target.cost = Math.max(Number(target.cost) || 0, Number(source?.cost) || 0);
+    target.priced = sourceWins ? source?.priced !== false : target.priced !== false;
+    return target;
+  }
+
   function turnTimestampMs(turn) {
     const direct = toCount(turn?.observedAt || turn?.startedAt || turn?.finishedAt || turn?.createdAt);
     if (direct) return direct;
@@ -3914,11 +3962,8 @@
   }
 
   function localDailyUsage(options = {}) {
-    const includeLocalWithCcDates = Boolean(options.includeLocalWithCcDates);
     ensureLocalLedgerLoaded();
     const byDayModel = new Map();
-    const ccSwitchDates = new Set();
-    const ccSwitchImportedAtByDate = new Map();
     const ledgerTurnIds = new Set();
     for (const turn of [...localUsageArchiveTurns(), ...state.localLedger]) {
       const usage = normalizeUsage(turn?.usage);
@@ -3926,59 +3971,41 @@
       const turnId = normalizeText(turn?.turnId || turn?.id, 120);
       if (turnId) ledgerTurnIds.add(turnId);
       const date = localDateKey(turnTimestampMs(turn) || Date.now());
-      const model = normalizeText(turn.model || modelName(), 120).toLowerCase() || UNKNOWN_MODEL;
-      const key = `${date}\u0001${model}`;
+      const key = date;
       const source = normalizeText(turn.source, 80);
       const importSource = normalizeText(turn.importSource, 80);
       const isCcSwitch = source === "cc-switch" || importSource === "cc-switch";
-      if (isCcSwitch) {
-        ccSwitchDates.add(date);
-        ccSwitchImportedAtByDate.set(date, Math.max(toCount(ccSwitchImportedAtByDate.get(date)), toCount(turn.importedAt || turn.observedAt || turn.createdAt)));
-      }
       const group = byDayModel.get(key) || {
         date,
         local: emptyDailyUsageBucket(date),
         ccSwitch: emptyDailyUsageBucket(date),
-        other: emptyDailyUsageBucket(date),
-        localTurns: [],
       };
       if (isCcSwitch) addTurnToDailyBucket(group.ccSwitch, turn, usage);
-      else if (source === "codex-live-token-cost") {
-        addTurnToDailyBucket(group.local, turn, usage);
-        group.localTurns.push({ turn, usage });
-      }
-      else addTurnToDailyBucket(group.other, turn, usage);
+      else addTurnToDailyBucket(group.local, turn, usage);
+      byDayModel.set(key, group);
+    }
+
+    const currentMetric = localTurnMetric(localCurrentTurn(currentSessionKey()));
+    if (currentMetric && !ledgerTurnIds.has(currentMetric.turnId)) {
+      const date = localDateKey(turnTimestampMs(currentMetric) || Date.now());
+      const key = date;
+      const group = byDayModel.get(key) || {
+        date,
+        local: emptyDailyUsageBucket(date),
+        ccSwitch: emptyDailyUsageBucket(date),
+      };
+      addTurnToDailyBucket(group.local, currentMetric, normalizeUsage(currentMetric.usage));
       byDayModel.set(key, group);
     }
 
     const days = new Map();
     for (const group of byDayModel.values()) {
       const prev = days.get(group.date) || emptyDailyUsageBucket(group.date);
-      if (ccSwitchDates.has(group.date)) {
-        addDailyBucket(prev, group.ccSwitch);
-        if (includeLocalWithCcDates) addDailyBucket(prev, group.local);
-        else {
-          const importedAt = toCount(ccSwitchImportedAtByDate.get(group.date));
-          for (const item of group.localTurns) {
-            if (importedAt && turnTimestampMs(item.turn) < importedAt) continue;
-            addTurnToDailyBucket(prev, item.turn, item.usage);
-          }
-        }
-      } else {
-        addDailyBucket(prev, group.local);
-      }
-      addDailyBucket(prev, group.other);
+      const merged = emptyDailyUsageBucket(group.date);
+      maxDailyBucket(merged, group.local);
+      maxDailyBucket(merged, group.ccSwitch);
+      addDailyBucket(prev, merged);
       days.set(group.date, prev);
-    }
-    const currentMetric = localTurnMetric(localCurrentTurn(currentSessionKey()));
-    if (currentMetric && !ledgerTurnIds.has(currentMetric.turnId)) {
-      const date = localDateKey(turnTimestampMs(currentMetric) || Date.now());
-      const bucket = days.get(date) || emptyDailyUsageBucket(date);
-      const importedAt = toCount(ccSwitchImportedAtByDate.get(date));
-      if (includeLocalWithCcDates || !ccSwitchDates.has(date) || !importedAt || turnTimestampMs(currentMetric) >= importedAt) {
-        addTurnToDailyBucket(bucket, currentMetric, normalizeUsage(currentMetric.usage));
-        days.set(date, bucket);
-      }
     }
     return days;
   }
@@ -4057,7 +4084,7 @@
     state.profilePrefs = next;
     state.badProfileImageUrl = "";
     scheduleProfileIdentitySync(0);
-    void invalidateProfileAccountsCheckQuery();
+    void scheduleProfileAccountsCheckRefresh();
     return next;
   }
 
@@ -4177,105 +4204,28 @@
     return state.profileAvatarRenderUrl;
   }
 
-  function removeProfileAvatarImages(avatar) {
-    Array.from(avatar.querySelectorAll?.("img[data-cltc-profile-avatar]") || []).forEach((img) => img.remove?.());
-  }
-
-  function cssImageUrl(url) {
-    return `url("${String(url || "").replace(/["\\\n\r\f]/g, "\\$&")}")`;
-  }
-
-  function clearProfileAvatarSurface(avatar) {
-    if (!avatar?.style) return;
-    avatar.style.backgroundImage = "";
-    avatar.style.backgroundSize = "";
-    avatar.style.backgroundPosition = "";
-    avatar.style.backgroundRepeat = "";
-    avatar.style.color = "";
-    avatar.style.fontSize = "";
-    avatar.style.lineHeight = "";
-    avatar.style.overflow = "";
-  }
-
-  function setProfileAvatarSurface(avatar, renderUrl) {
-    if (!avatar?.style || !renderUrl) return;
-    avatar.style.backgroundImage = cssImageUrl(renderUrl);
-    avatar.style.backgroundSize = "cover";
-    avatar.style.backgroundPosition = "center";
-    avatar.style.backgroundRepeat = "no-repeat";
-    avatar.style.color = "transparent";
-    avatar.style.fontSize = "0";
-    avatar.style.lineHeight = "0";
-    avatar.style.overflow = "hidden";
-  }
-
-  function clearProfileAvatarText(avatar, img) {
-    Array.from(avatar.childNodes || []).forEach((node) => {
-      if (node !== img && node.nodeType === 3) node.remove?.();
-    });
-    if (!avatar.childNodes && Array.isArray(avatar.children)) avatar.textContent = "";
-  }
-
-  function syncProfileAvatarFallback(avatar, displayName) {
-    if (!avatar) return false;
-    removeProfileAvatarImages(avatar);
-    clearProfileAvatarSurface(avatar);
-    const fallback = profileFallbackInitial(displayName);
-    if (normalizeText(avatar.textContent || "", 20) !== fallback) avatar.textContent = fallback;
-    return true;
-  }
-
-  function syncProfileAvatarElement(avatar, imageUrl, displayName, doc = document) {
-    if (!avatar || !doc.createElement) return false;
-    if (!imageUrl || state.badProfileImageUrl === imageUrl) return syncProfileAvatarFallback(avatar, displayName);
+  function syncProfileAvatarElement(avatar, imageUrl, displayName) {
+    if (!avatar || !imageUrl || state.badProfileImageUrl === imageUrl) return false;
     const renderUrl = profileAvatarDisplayUrl(imageUrl);
     const signature = profileIdentitySignature(displayName, imageUrl);
-    let img = avatar.querySelector?.("img[data-cltc-profile-avatar]");
+    const img = avatar.querySelector?.("img[data-cltc-profile-avatar]") || avatar.querySelector?.("img");
+    if (!img) return false;
     if (
-      img &&
       (avatar.__codexLiveTokenCostProfileSig === signature || avatar.getAttribute?.("data-cltc-profile-sig") === signature) &&
       (img.getAttribute?.("src") === renderUrl || img.src === renderUrl) &&
       (!img.complete || img.naturalWidth > 0)
     ) {
       return true;
     }
-    if (!img) {
-      img = doc.createElement("img");
-      img.setAttribute("data-cltc-profile-avatar", "true");
-      avatar.appendChild?.(img);
-    }
-    setProfileAvatarSurface(avatar, renderUrl);
-    clearProfileAvatarText(avatar, img);
     img.onerror = () => {
-      if (img.src === renderUrl || img.getAttribute?.("src") === renderUrl) {
-        state.badProfileImageUrl = imageUrl;
-        syncProfileAvatarFallback(avatar, displayName);
-      }
+      if (img.src === renderUrl || img.getAttribute?.("src") === renderUrl) state.badProfileImageUrl = imageUrl;
     };
     img.onload = () => {
-      if (img.naturalWidth > 0) {
-        state.badProfileImageUrl = "";
-        clearProfileAvatarText(avatar, img);
-        img.style.display = "block";
-      }
+      if (img.naturalWidth > 0) state.badProfileImageUrl = "";
     };
     if (img.getAttribute?.("src") !== renderUrl && img.src !== renderUrl) img.src = renderUrl;
     const alt = profileFallbackInitial(displayName);
     if (img.alt !== alt) img.alt = alt;
-    if (img.style.width !== "100%") img.style.width = "100%";
-    if (img.style.height !== "100%") img.style.height = "100%";
-    if (img.style.objectFit !== "cover") img.style.objectFit = "cover";
-    if (img.style.borderRadius !== "inherit") img.style.borderRadius = "inherit";
-    if (img.complete && img.naturalWidth > 0) {
-      state.badProfileImageUrl = "";
-      clearProfileAvatarText(avatar, img);
-      if (img.style.display !== "block") img.style.display = "block";
-    } else if (img.complete && img.naturalWidth === 0 && img.src) {
-      state.badProfileImageUrl = imageUrl;
-      return syncProfileAvatarFallback(avatar, displayName);
-    } else if (img.style.display !== "block") {
-      img.style.display = "block";
-    }
     avatar.__codexLiveTokenCostProfileSig = signature;
     avatar.setAttribute?.("data-cltc-profile-sig", signature);
     return true;
@@ -4285,67 +4235,17 @@
     const direct = doc.querySelector?.(
       "button[aria-label='打开个人资料菜单'], button[aria-label='Open profile menu'], button[aria-label='Open profile menu and settings']",
     );
-    if (direct) {
-      const rect = direct.getBoundingClientRect?.() || { width: 0, height: 0 };
-      if (rect.width !== 0 && rect.height !== 0) return direct;
-    }
-    const nodes = Array.from(doc.querySelectorAll?.("aside button[aria-label], aside button[aria-haspopup='menu'], aside button") || []);
-    const viewportHeight = doc.defaultView?.innerHeight || (typeof window !== "undefined" ? window.innerHeight : 0) || 1200;
-    const candidates = nodes
-      .map((button) => {
-        const text = normalizeText(button.innerText || button.textContent || "", 240);
-        const aria = normalizeText(button.getAttribute?.("aria-label") || "", 120);
-        const rect = button.getBoundingClientRect?.() || { top: 0, left: 0, width: 0, height: 0 };
-        const nearBottom = rect.top >= viewportHeight - 180;
-        const inAppSidebar = rect.left < 320 || !button.getBoundingClientRect;
-        const looksLikeAccount =
-          /打开设置|open settings/i.test(aria) ||
-          (/设置|settings/i.test(aria) && /Free|Go|Plus|Pro|Business|Enterprise|Edu|Local Usage/i.test(text)) ||
-          /Free|Go|Plus|Pro|Business|Enterprise|Edu|Local Usage/i.test(text);
-        return { button, text, aria, rect, score: (looksLikeAccount ? 10 : 0) + (nearBottom ? 5 : 0) + (inAppSidebar ? 1 : 0) + rect.top / 10000 };
-      })
-      .filter((item) => item.score >= 16 && item.rect.width !== 0 && item.rect.height !== 0);
-    candidates.sort((a, b) => b.score - a.score || b.rect.top - a.rect.top);
-    return candidates[0]?.button || null;
+    if (!direct) return null;
+    const rect = direct.getBoundingClientRect?.() || { width: 0, height: 0 };
+    return rect.width !== 0 && rect.height !== 0 ? direct : null;
   }
 
   function syncSidebarProfileIdentity(doc = document) {
     const prefs = localProfilePrefs();
     const displayName = prefs.displayName || prefs.username || "Local Usage";
-    const planLabel = localProfilePlanLabel();
     const button = findSidebarProfileButton(doc);
-    if (!button) return false;
-
-    const spans = Array.from(button.querySelectorAll?.("span") || []);
-    const avatar = spans.find((span) => {
-      const className = String(span.className || "");
-      const text = normalizeText(span.textContent || "", 20);
-      const rect = span.getBoundingClientRect?.() || { width: 0, height: 0 };
-      return (
-        /rounded-full/.test(className) &&
-        (/size-7|h-7|w-7/.test(className) || (rect.width >= 24 && rect.width <= 40 && rect.height >= 24 && rect.height <= 40) || text.length <= 2)
-      );
-    });
-    if (avatar) {
-      if (prefs.imageUrl && doc.createElement) {
-        syncProfileAvatarElement(avatar, prefs.imageUrl, displayName, doc);
-      } else if (normalizeText(avatar.textContent || "", 20) !== displayName.slice(0, 1)) {
-        avatar.textContent = profileFallbackInitial(displayName);
-      }
-    }
-
-    const leaves = spans.filter((span) => span !== avatar && !span.querySelector?.("span,img,svg"));
-    const nameNode =
-      leaves.find((span) => /text-base/.test(String(span.className || ""))) ||
-      leaves.find((span) => ["设置", "Local Usage"].includes(normalizeText(span.textContent || "", 64))) ||
-      leaves.find((span) => normalizeText(span.textContent || "", 64) && !/Free|Go|Plus|Pro|Business|Enterprise|Edu/.test(span.textContent || ""));
-    if (nameNode && normalizeText(nameNode.textContent || "", 64) !== displayName) nameNode.textContent = displayName;
-
-    const planNode =
-      leaves.find((span) => /text-xs|tertiary/.test(String(span.className || ""))) ||
-      leaves.find((span) => /Free|Go|Plus|Pro|Business|Enterprise|Edu|API/i.test(span.textContent || ""));
-    if (planNode && normalizeText(planNode.textContent || "", 64) !== planLabel) planNode.textContent = planLabel;
-    return true;
+    if (!button || !prefs.imageUrl) return false;
+    return syncProfileAvatarElement(button, prefs.imageUrl, displayName);
   }
 
   function syncVisibleProfilePhotoIdentity(doc = document) {
@@ -4375,67 +4275,11 @@
     return Boolean(syncSidebarProfileIdentity(doc) || syncVisibleProfilePhotoIdentity(doc));
   }
 
-  function syncOpenProfileAccountMenuIdentity(doc = document) {
-    const prefs = localProfilePrefs();
-    const email = normalizeText(prefs.email, 128);
-    if (!email) return false;
-    const label = prefs.accountStructure === "workspace" ? normalizeProfileWorkspaceName(prefs.workspaceName) : "Personal account";
-    const profileButton = doc.querySelector?.(
-      "button[aria-label='打开个人资料菜单'], button[aria-label='Open profile menu'], button[aria-label='Open profile menu and settings']",
-    );
-    const controlledId = normalizeText(profileButton?.getAttribute?.("aria-controls"), 160);
-    const controlledMenu = controlledId ? doc.getElementById?.(controlledId) || doc.querySelector?.(`#${controlledId}`) : null;
-    const menus = Array.from(doc.querySelectorAll?.("[role='menu'][data-radix-menu-content], [role='menu']") || []);
-    const menu =
-      controlledMenu ||
-      menus.find((node) => normalizeText(node.innerText || node.textContent || "", 1000).includes(email)) ||
-      menus.find((node) => /API\s*(?:密钥|key)|Amazon Bedrock|Copilot/i.test(normalizeText(node.innerText || node.textContent || "", 1000)));
-    if (!menu) return false;
-    const items = Array.from(menu.querySelectorAll?.("button,[role='menuitem']") || []).filter((node) => normalizeText(node.innerText || node.textContent || "", 240));
-    const emailIndex = items.findIndex((node) => normalizeText(node.innerText || node.textContent || "", 240).includes(email));
-    const accountItem = emailIndex >= 0 ? items[emailIndex + 1] : null;
-    if (accountItem) {
-      const leaves = Array.from(accountItem.querySelectorAll?.("span,div") || []).filter((node) => !node.querySelector?.("span,div,img,svg") && normalizeText(node.textContent || "", 120));
-      const target = leaves.at(-1) || accountItem;
-      if (normalizeText(target.textContent || "", 120) !== label) target.textContent = label;
-      return true;
-    }
-    const apiItem = items.find((node) => /API\s*(?:密钥|key)|Amazon Bedrock|Copilot/i.test(normalizeText(node.innerText || node.textContent || "", 240)));
-    if (apiItem) {
-      const emailNode = apiItem.querySelector?.(".flex-1, span");
-      if (!emailNode) return false;
-      emailNode.textContent = email;
-      let labelNode = apiItem.querySelector?.("[data-cltc-profile-account-label]");
-      if (!labelNode && doc.createElement) {
-        labelNode = doc.createElement("div");
-        labelNode.dataset.cltcProfileAccountLabel = "true";
-        labelNode.className = "pl-[26px] text-xs text-token-text-secondary";
-        apiItem.appendChild?.(labelNode);
-      }
-      if (labelNode) labelNode.textContent = label;
-      return Boolean(labelNode);
-    }
-    const identityIndex = items.findIndex(
-      (node) => node.getAttribute?.("aria-disabled") === "true" || node.hasAttribute?.("data-disabled") || Boolean(node.querySelector?.("img")),
-    );
-    const identityItem = identityIndex >= 0 ? items[identityIndex] : null;
-    const identityAccountItem = identityIndex >= 0 ? items[identityIndex + 1] : null;
-    if (!identityItem || !identityAccountItem) return false;
-    const identityLeaves = Array.from(identityItem.querySelectorAll?.("span,div") || []).filter((node) => !node.querySelector?.("span,div,img,svg") && normalizeText(node.textContent || "", 120));
-    const identityTarget = identityLeaves.at(-1) || identityItem;
-    identityTarget.textContent = email;
-    const accountLeaves = Array.from(identityAccountItem.querySelectorAll?.("span,div") || []).filter((node) => !node.querySelector?.("span,div,img,svg") && normalizeText(node.textContent || "", 120));
-    const accountTarget = accountLeaves.at(-1) || identityAccountItem;
-    accountTarget.textContent = label;
-    return true;
-  }
-
   function scheduleProfileIdentitySync(delay = 80) {
     if (state.profileIdentitySyncTimer || typeof window === "undefined" || typeof window.setTimeout !== "function") return;
     state.profileIdentitySyncTimer = window.setTimeout(() => {
       state.profileIdentitySyncTimer = 0;
       syncProfileIdentity();
-      syncOpenProfileAccountMenuIdentity();
     }, delay);
   }
 
@@ -4619,7 +4463,7 @@
   function profileFetchBodyWithHelperRefresh(method, body, url) {
     if (isProfileAccountsCheckUrl(url)) return profileFetchBody(method, body, url);
     if (String(method || "GET").toUpperCase() !== "GET" || typeof window.fetch !== "function") return profileFetchBody(method, body, url);
-    void pollLocalHelperStats();
+    void refreshProfileData();
     return profileFetchBody(method, body, url);
   }
 
@@ -4686,14 +4530,23 @@
 
   async function invalidateProfileQuery(queryKey) {
     if (window.__CODEX_LIVE_TOKEN_COST_TEST__) return false;
+    if (!state.profileQueryClient) {
+      rememberProfileQueryClient(profileQueryClientFromFiberNode(findSidebarProfileButton(document)));
+    }
+    let invalidatedLocally = false;
+    try {
+      invalidatedLocally = await invalidateProfileQueryWithClient(state.profileQueryClient, queryKey);
+    } catch {
+      // Keep the broadcast fallback available when the local query client is unavailable.
+    }
     try {
       const module = await loadCodexAppModule("vscode-api-");
       const dispatcher = Object.values(module || {}).find((value) => value && typeof value.dispatchMessage === "function");
-      if (!dispatcher) return false;
+      if (!dispatcher) return invalidatedLocally;
       dispatcher.dispatchMessage("query-cache-invalidate", { queryKey: queryKey.slice() });
       return true;
     } catch {
-      return false;
+      return invalidatedLocally;
     }
   }
 
@@ -4701,8 +4554,24 @@
     return invalidateProfileQuery(PROFILE_USAGE_QUERY_KEY);
   }
 
+  function chainProfileQueryRefresh(previous, refresh) {
+    return Promise.resolve(previous).catch(() => undefined).then(refresh);
+  }
+
+  async function invalidateProfileQueryWithClient(queryClient, queryKey) {
+    if (!isProfileQueryClient(queryClient)) return false;
+    await queryClient.invalidateQueries({ queryKey: queryKey.slice() });
+    return true;
+  }
+
   function invalidateProfileAccountsCheckQuery() {
     return invalidateProfileQuery(PROFILE_ACCOUNTS_CHECK_QUERY_KEY);
+  }
+
+  function scheduleProfileAccountsCheckRefresh() {
+    const next = chainProfileQueryRefresh(state.profileAccountsRefreshPromise, invalidateProfileAccountsCheckQuery);
+    state.profileAccountsRefreshPromise = next.catch(() => false);
+    return state.profileAccountsRefreshPromise;
   }
 
   function scheduleProfileUsageRefresh(delay = 1000) {
@@ -5045,7 +4914,17 @@
     state.priceEditorModel = modelName();
     void pollLocalHelperStats();
     render(true);
+    const focusModal = () => state.settingsOverlay?.querySelector("[data-action='close-price']")?.focus?.();
+    if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(focusModal);
+    else focusModal();
     if (state.settingsPanel === "usage") void refreshUsageAnalyticsFromHelper();
+  }
+
+  function closeSettingsEditor() {
+    state.priceEditorOpen = false;
+    state.analyticsModel = "";
+    state.analyticsModelsExpanded = false;
+    render(true);
   }
 
   function headerSettingsLabel(snap = null) {
@@ -5063,13 +4942,13 @@
 
   function ensureHeaderSettingsButton(doc = document) {
     ensureStyle();
+    const existingButton = doc.getElementById?.(SETTINGS_BUTTON_ID);
+    if (!state.settingsButton && existingButton?.id === SETTINGS_BUTTON_ID) state.settingsButton = existingButton;
+    if (state.settingsButton && state.settingsButton.id !== SETTINGS_BUTTON_ID) state.settingsButton = null;
     const menu = findCodexPlusMenu(doc);
     if (!menu?.parentElement) {
-      state.settingsButton?.remove?.();
-      state.settingsButton = null;
-      return null;
+      return state.settingsButton || (existingButton?.id === SETTINGS_BUTTON_ID ? existingButton : null);
     }
-    const existingButton = doc.getElementById?.(SETTINGS_BUTTON_ID);
     if (existingButton && existingButton !== state.settingsButton) existingButton.remove?.();
     if (!state.settingsButton) {
       const button = doc.createElement("button");
@@ -5086,6 +4965,7 @@
       });
       state.settingsButton = button;
     }
+    if (!state.settingsButton.style) state.settingsButton.style = {};
     const menuRect = menu.getBoundingClientRect?.();
     const floating = menu.parentElement === doc.documentElement || menu.parentElement === doc.body || /codex-plus-menu-floating/i.test(String(menu.className || ""));
     const setFloating = (value) => {
@@ -5137,6 +5017,13 @@
         --cltc-arc-bg: light-dark(rgb(246, 246, 246), rgba(255, 255, 255, .08));
         --cltc-arc-radius: var(--radius-2xl, 20px);
         --cltc-shimmer-contrast: #fff;
+        --cltc-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+        --cltc-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+        --cltc-duration-press: 160ms;
+        --cltc-duration-tooltip: 125ms;
+        --cltc-duration-popover: 180ms;
+        --cltc-duration-modal: 200ms;
+        --cltc-duration-data: 160ms;
         box-sizing: border-box;
         color-scheme: light dark;
         position: relative;
@@ -5206,10 +5093,24 @@
         max-width: 100%;
       }
       #${ROOT_ID} .cltc-model-text {
+        display: inline-flex;
+        align-items: center;
         min-width: 0;
+        max-width: 100%;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      #${ROOT_ID} .cltc-model-effort {
+        flex: 0 0 auto;
+        color: var(--cltc-muted);
+      }
+      #${ROOT_ID} .cltc-model-effort:not(:empty)::before {
+        content: " · ";
+        color: var(--cltc-muted);
+      }
+      #${ROOT_ID} .cltc-model-effort[data-effort="ultra"] {
+        color: var(--color-token-charts-purple, rgb(146, 79, 247));
       }
       #${ROOT_ID} .cltc-fast-mode-icon {
         display: inline-block;
@@ -5315,8 +5216,7 @@
         height: var(--cltc-roll-row);
         contain: layout size style;
         transform: translateY(var(--cltc-roll-to-y, 0px));
-        transition: transform var(--transition-duration-relaxed, .3s) cubic-bezier(.16, 1, .3, 1);
-        will-change: transform;
+        transition: transform var(--cltc-duration-data) var(--cltc-ease-out);
       }
       #${ROOT_ID} .cltc-roll-digit-stack > span {
         flex: 0 0 var(--cltc-roll-row);
@@ -5391,6 +5291,13 @@
         --cltc-primary: var(--color-token-text-primary, light-dark(#171717, #f4f4f5));
         --cltc-primary-text: var(--color-token-main-surface-primary, light-dark(#ffffff, #18181b));
         --cltc-danger: light-dark(#b42318, #f97066);
+        --cltc-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+        --cltc-ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+        --cltc-duration-press: 160ms;
+        --cltc-duration-tooltip: 125ms;
+        --cltc-duration-popover: 180ms;
+        --cltc-duration-modal: 200ms;
+        --cltc-duration-data: 160ms;
         position: fixed;
         inset: 0;
         z-index: 2147483647;
@@ -5433,6 +5340,50 @@
         background: var(--cltc-popover);
         box-shadow: 0 18px 55px var(--cltc-shadow);
         color: var(--cltc-text);
+        opacity: 1;
+        transform: translateY(0) scale(1);
+        transition: opacity var(--cltc-duration-modal) var(--cltc-ease-out),
+          transform var(--cltc-duration-modal) var(--cltc-ease-out);
+      }
+      .cltc-settings-overlay[data-cltc-entering="true"] .cltc-settings-modal {
+        opacity: 0;
+        transform: translateY(4px) scale(.97);
+      }
+      .cltc-settings-overlay[data-cltc-closing="true"] {
+        pointer-events: none;
+      }
+      .cltc-settings-overlay[data-cltc-closing="true"] .cltc-settings-modal {
+        opacity: 0;
+        transform: translateY(2px) scale(.98);
+        transition: opacity var(--cltc-duration-press) var(--cltc-ease-out),
+          transform var(--cltc-duration-press) var(--cltc-ease-out);
+      }
+      .cltc-settings-overlay .cltc-settings-content {
+        transition: opacity var(--cltc-duration-popover) var(--cltc-ease-out),
+          transform var(--cltc-duration-popover) var(--cltc-ease-out);
+      }
+      .cltc-settings-overlay .cltc-settings-content[data-cltc-switching="true"] {
+        opacity: .45;
+        transform: translateY(4px);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .cltc-settings-modal {
+          transform: none;
+          transition: opacity var(--cltc-duration-press) var(--cltc-ease-out);
+        }
+        .cltc-settings-overlay[data-cltc-entering="true"] .cltc-settings-modal {
+          transform: none;
+        }
+        .cltc-settings-overlay[data-cltc-closing="true"] .cltc-settings-modal {
+          transform: none;
+          transition: opacity var(--cltc-duration-press) var(--cltc-ease-out);
+        }
+        .cltc-settings-overlay .cltc-settings-content {
+          transition: opacity var(--cltc-duration-press) var(--cltc-ease-out);
+        }
+        .cltc-settings-overlay .cltc-settings-content[data-cltc-switching="true"] {
+          transform: none;
+        }
       }
       .cltc-settings-overlay .cltc-settings-content::-webkit-scrollbar,
       .cltc-settings-overlay .cltc-price-list::-webkit-scrollbar {
@@ -5477,12 +5428,40 @@
         cursor: pointer;
         font: 20px/1 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
-      #${ROOT_ID} .cltc-price-head button:hover,
       #${ROOT_ID} .cltc-price-head button:focus-visible,
-      .cltc-settings-overlay .cltc-price-head button:hover,
       .cltc-settings-overlay .cltc-price-head button:focus-visible {
         background: var(--cltc-hover);
         outline: none;
+      }
+      #${ROOT_ID} .cltc-button,
+      #${ROOT_ID} .cltc-price-head button,
+      #${ROOT_ID} .cltc-price-actions button,
+      .cltc-settings-overlay button,
+      .cltc-header-settings {
+        transition: transform var(--cltc-duration-press) var(--cltc-ease-out),
+          background var(--cltc-duration-press) var(--cltc-ease-out),
+          color var(--cltc-duration-press) var(--cltc-ease-out),
+          border-color var(--cltc-duration-press) var(--cltc-ease-out);
+      }
+      .cltc-settings-overlay .cltc-settings-nav button,
+      .cltc-settings-overlay .cltc-price-row {
+        transition: transform var(--cltc-duration-press) var(--cltc-ease-out),
+          background var(--cltc-duration-press) var(--cltc-ease-out),
+          color var(--cltc-duration-press) var(--cltc-ease-out),
+          border-color var(--cltc-duration-press) var(--cltc-ease-out);
+      }
+      .cltc-settings-overlay .cltc-profile-select,
+      .cltc-settings-overlay .cltc-price-input {
+        transition: background var(--cltc-duration-press) var(--cltc-ease-out),
+          color var(--cltc-duration-press) var(--cltc-ease-out),
+          border-color var(--cltc-duration-press) var(--cltc-ease-out);
+      }
+      #${ROOT_ID} .cltc-button:active,
+      #${ROOT_ID} .cltc-price-head button:active,
+      #${ROOT_ID} .cltc-price-actions button:active,
+      .cltc-settings-overlay button:active,
+      .cltc-header-settings:active {
+        transform: scale(.97);
       }
       .cltc-settings-overlay .cltc-settings-shell {
         display: grid;
@@ -5530,7 +5509,6 @@
         font: inherit;
         text-align: left;
       }
-      .cltc-settings-overlay .cltc-settings-nav button:hover,
       .cltc-settings-overlay .cltc-settings-nav button:focus-visible,
       .cltc-settings-overlay .cltc-settings-nav button[data-active="true"] {
         background: var(--cltc-hover);
@@ -5610,6 +5588,49 @@
       .cltc-settings-overlay .cltc-sync-status[data-helper-unavailable="true"] {
         color: color-mix(in srgb, #b45309 75%, var(--cltc-text));
       }
+      .cltc-settings-overlay .cltc-sync-status {
+        transition: opacity var(--cltc-duration-tooltip) var(--cltc-ease-out);
+      }
+      .cltc-settings-overlay .cltc-sync-status[data-cltc-status-pulse="true"] {
+        opacity: .48;
+      }
+      .cltc-settings-overlay .cltc-profile-save-toast {
+        position: fixed;
+        top: max(18px, env(safe-area-inset-top));
+        left: 50%;
+        z-index: 2;
+        display: block;
+        max-width: min(420px, calc(100vw - 32px));
+        padding: 10px 14px;
+        border: 1px solid var(--cltc-border);
+        border-radius: 8px;
+        background: var(--cltc-popover);
+        box-shadow: 0 10px 28px var(--cltc-shadow);
+        color: var(--cltc-text);
+        font-size: 13px;
+        line-height: 18px;
+        overflow-wrap: anywhere;
+        text-align: center;
+        opacity: 0;
+        pointer-events: none;
+        transform: translate(-50%, -8px);
+        visibility: hidden;
+        transition: opacity var(--cltc-duration-popover) var(--cltc-ease-out), transform var(--cltc-duration-popover) var(--cltc-ease-out), visibility 0s linear var(--cltc-duration-popover);
+      }
+      .cltc-settings-overlay .cltc-profile-save-toast[data-visible="true"] {
+        opacity: 1;
+        transform: translate(-50%, 0);
+        visibility: visible;
+        transition-delay: 0s;
+      }
+      .cltc-settings-overlay .cltc-profile-save-toast[data-tone="success"] {
+        border-color: color-mix(in srgb, #10a37f 42%, var(--cltc-border));
+        color: color-mix(in srgb, #10a37f 78%, var(--cltc-text));
+      }
+      .cltc-settings-overlay .cltc-profile-save-toast[data-tone="error"] {
+        border-color: color-mix(in srgb, var(--cltc-danger) 52%, var(--cltc-border));
+        color: var(--cltc-danger);
+      }
       #${ROOT_ID} .cltc-price-row,
       .cltc-settings-overlay .cltc-price-row {
         display: grid;
@@ -5672,6 +5693,12 @@
         display: grid;
         gap: 6px;
       }
+      .cltc-settings-overlay .cltc-profile-field-note {
+        margin-top: -2px;
+        color: var(--cltc-muted);
+        font-size: 11px;
+        line-height: 16px;
+      }
       #${ROOT_ID} .cltc-toggle-field,
       .cltc-settings-overlay .cltc-toggle-field {
         display: grid;
@@ -5695,7 +5722,9 @@
         border-radius: 999px;
         background: var(--cltc-surface-secondary);
         cursor: pointer;
-        transition: background .15s ease, border-color .15s ease;
+        transition: transform var(--cltc-duration-press) var(--cltc-ease-out),
+          background var(--cltc-duration-press) var(--cltc-ease-out),
+          border-color var(--cltc-duration-press) var(--cltc-ease-out);
       }
       #${ROOT_ID} .cltc-toggle-field input::after,
       .cltc-settings-overlay .cltc-toggle-field input::after {
@@ -5708,7 +5737,7 @@
         border-radius: 50%;
         background: var(--cltc-surface);
         box-shadow: 0 1px 3px rgba(0, 0, 0, .22);
-        transition: transform .15s ease;
+        transition: transform var(--cltc-duration-press) var(--cltc-ease-out);
       }
       #${ROOT_ID} .cltc-toggle-field input:checked,
       .cltc-settings-overlay .cltc-toggle-field input:checked {
@@ -5718,6 +5747,10 @@
       #${ROOT_ID} .cltc-toggle-field input:checked::after,
       .cltc-settings-overlay .cltc-toggle-field input:checked::after {
         transform: translateX(14px);
+      }
+      #${ROOT_ID} .cltc-toggle-field input:active,
+      .cltc-settings-overlay .cltc-toggle-field input:active {
+        transform: scale(.97);
       }
       #${ROOT_ID} .cltc-toggle-field input:focus-visible,
       .cltc-settings-overlay .cltc-toggle-field input:focus-visible {
@@ -5765,14 +5798,12 @@
       #${ROOT_ID} .cltc-profile-select::picker-icon,
       .cltc-settings-overlay .cltc-profile-select::picker-icon {
         color: var(--cltc-muted);
-        transition: rotate .16s ease;
+        transition: rotate var(--cltc-duration-press) var(--cltc-ease-in-out);
       }
       #${ROOT_ID} .cltc-profile-select:open::picker-icon,
       .cltc-settings-overlay .cltc-profile-select:open::picker-icon {
         rotate: 180deg;
       }
-      #${ROOT_ID} .cltc-profile-select:hover,
-      .cltc-settings-overlay .cltc-profile-select:hover,
       #${ROOT_ID} .cltc-profile-select:open,
       .cltc-settings-overlay .cltc-profile-select:open {
         border-color: color-mix(in srgb, var(--cltc-text) 52%, var(--cltc-border));
@@ -5786,10 +5817,8 @@
         background: var(--cltc-popover);
         color: var(--cltc-text);
       }
-      #${ROOT_ID} .cltc-profile-select option:hover,
       #${ROOT_ID} .cltc-profile-select option:focus,
       #${ROOT_ID} .cltc-profile-select option:checked,
-      .cltc-settings-overlay .cltc-profile-select option:hover,
       .cltc-settings-overlay .cltc-profile-select option:focus,
       .cltc-settings-overlay .cltc-profile-select option:checked {
         background: var(--cltc-hover);
@@ -5833,23 +5862,10 @@
         font: inherit;
         text-decoration: none;
       }
-      #${ROOT_ID} .cltc-price-actions button:hover,
-      #${ROOT_ID} .cltc-price-actions .cltc-link-button:hover,
-      #${ROOT_ID} .cltc-price-row:hover,
-      .cltc-settings-overlay .cltc-price-actions button:hover,
-      .cltc-settings-overlay .cltc-price-actions .cltc-link-button:hover,
-      .cltc-settings-overlay .cltc-settings-row button:hover,
-      .cltc-settings-overlay .cltc-settings-row .cltc-link-button:hover,
-      .cltc-settings-overlay .cltc-price-row:hover {
-        background: var(--cltc-hover);
-      }
       .cltc-settings-overlay button[data-variant="primary"] {
         border-color: var(--cltc-primary);
         background: var(--cltc-primary);
         color: var(--cltc-primary-text);
-      }
-      .cltc-settings-overlay button[data-variant="primary"]:hover {
-        background: color-mix(in srgb, var(--cltc-primary) 88%, transparent);
       }
       .cltc-settings-overlay button[data-variant="danger"] {
         color: var(--cltc-danger);
@@ -5895,10 +5911,14 @@
         cursor: pointer;
         font: inherit;
       }
-      .cltc-settings-overlay .cltc-segmented button:hover,
+      .cltc-settings-overlay .cltc-segmented button {
+        transition: transform var(--cltc-duration-press) var(--cltc-ease-out),
+          opacity var(--cltc-duration-press) var(--cltc-ease-out),
+          background var(--cltc-duration-press) var(--cltc-ease-out),
+          color var(--cltc-duration-press) var(--cltc-ease-out);
+      }
       .cltc-settings-overlay .cltc-segmented button:focus-visible,
       .cltc-settings-overlay .cltc-segmented button[data-active="true"],
-      .cltc-settings-overlay .cltc-date-range-trigger:hover,
       .cltc-settings-overlay .cltc-date-range-trigger:focus-visible {
         background: var(--cltc-popover);
         color: var(--cltc-text);
@@ -5907,6 +5927,10 @@
       }
       .cltc-settings-overlay .cltc-segmented button[data-active="true"] {
         font-weight: 600;
+      }
+      .cltc-settings-overlay .cltc-segmented[data-cltc-range-switching="true"] button[data-active="true"] {
+        opacity: .72;
+        transform: translateY(2px);
       }
       .cltc-settings-overlay .cltc-segmented-compact button {
         min-width: 52px;
@@ -6008,9 +6032,8 @@
         stroke-width: 2px;
         vector-effect: non-scaling-stroke;
         outline: none !important;
-        transition: opacity .15s ease;
+        transition: opacity var(--cltc-duration-tooltip) var(--cltc-ease-out);
       }
-      .cltc-settings-overlay .cltc-analytics-chart rect[data-chart-index]:hover,
       .cltc-settings-overlay .cltc-analytics-chart rect[data-chart-index]:focus-visible {
         opacity: .66;
         outline: none !important;
@@ -6026,11 +6049,19 @@
       .cltc-settings-overlay .cltc-analytics-tooltip {
         opacity: 0;
         pointer-events: none;
-        transition: opacity .12s ease;
+        transition: opacity var(--cltc-duration-tooltip) var(--cltc-ease-out);
       }
-      .cltc-settings-overlay .cltc-analytics-bar:hover .cltc-analytics-tooltip,
       .cltc-settings-overlay .cltc-analytics-bar:focus-within .cltc-analytics-tooltip {
         opacity: 1;
+      }
+      @media (hover: hover) and (pointer: fine) {
+        .cltc-settings-overlay .cltc-analytics-chart rect[data-chart-index]:hover {
+          opacity: .66;
+          outline: none !important;
+        }
+        .cltc-settings-overlay .cltc-analytics-bar:hover .cltc-analytics-tooltip {
+          opacity: 1;
+        }
       }
       .cltc-settings-overlay .cltc-analytics-tooltip rect {
         fill: var(--cltc-text);
@@ -6109,7 +6140,6 @@
         font: inherit;
         text-align: left;
       }
-      .cltc-settings-overlay .cltc-analytics-model-row:hover,
       .cltc-settings-overlay .cltc-analytics-model-row:focus-visible {
         background: var(--cltc-hover);
         outline: none;
@@ -6134,6 +6164,46 @@
         color: var(--cltc-muted);
         font-size: 12px;
         text-align: center;
+      }
+      @media (hover: hover) and (pointer: fine) {
+        #${ROOT_ID} .cltc-price-head button:hover,
+        .cltc-settings-overlay .cltc-price-head button:hover,
+        #${ROOT_ID} .cltc-price-actions button:hover,
+        #${ROOT_ID} .cltc-price-actions .cltc-link-button:hover,
+        #${ROOT_ID} .cltc-price-row:hover,
+        .cltc-settings-overlay .cltc-price-actions button:hover,
+        .cltc-settings-overlay .cltc-price-actions .cltc-link-button:hover,
+        .cltc-settings-overlay .cltc-settings-row button:hover,
+        .cltc-settings-overlay .cltc-settings-row .cltc-link-button:hover,
+        .cltc-settings-overlay .cltc-price-row:hover,
+        .cltc-settings-overlay .cltc-analytics-model-row:hover,
+        .cltc-header-settings:hover {
+          background: var(--cltc-hover);
+        }
+        .cltc-settings-overlay .cltc-settings-nav button:hover {
+          background: var(--cltc-hover);
+          color: var(--cltc-text);
+          outline: none;
+        }
+        #${ROOT_ID} .cltc-profile-select:hover,
+        .cltc-settings-overlay .cltc-profile-select:hover {
+          border-color: color-mix(in srgb, var(--cltc-text) 52%, var(--cltc-border));
+          background: color-mix(in srgb, var(--cltc-surface-secondary) 70%, var(--cltc-input));
+        }
+        #${ROOT_ID} .cltc-profile-select option:hover,
+        .cltc-settings-overlay .cltc-profile-select option:hover {
+          background: var(--cltc-hover);
+        }
+        .cltc-settings-overlay button[data-variant="primary"]:hover {
+          background: color-mix(in srgb, var(--cltc-primary) 88%, transparent);
+        }
+        .cltc-settings-overlay .cltc-segmented button:hover,
+        .cltc-settings-overlay .cltc-date-range-trigger:hover {
+          background: var(--cltc-popover);
+          color: var(--cltc-text);
+          outline: none;
+          box-shadow: 0 1px 2px color-mix(in srgb, var(--cltc-shadow) 34%, transparent);
+        }
       }
       @media (max-width: 680px) {
         .cltc-settings-overlay {
@@ -6206,11 +6276,49 @@
         }
       }
       @media (prefers-reduced-motion: reduce) {
-        .cltc-settings-overlay .cltc-analytics-chart rect {
+        #${ROOT_ID} .cltc-button,
+        #${ROOT_ID} .cltc-price-head button,
+        #${ROOT_ID} .cltc-price-actions button,
+        .cltc-settings-overlay button,
+        .cltc-header-settings,
+        #${ROOT_ID} .cltc-button:active,
+        #${ROOT_ID} .cltc-price-head button:active,
+        #${ROOT_ID} .cltc-price-actions button:active,
+        .cltc-settings-overlay button:active,
+        .cltc-header-settings:active {
           transition: none;
+          transform: none;
+        }
+        .cltc-settings-overlay .cltc-analytics-chart rect {
+          transition: opacity var(--cltc-duration-tooltip) var(--cltc-ease-out);
+        }
+        .cltc-settings-overlay .cltc-sync-status,
+        .cltc-settings-overlay .cltc-sync-status[data-cltc-status-pulse="true"] {
+          transition: none;
+          opacity: 1;
+        }
+        .cltc-settings-overlay .cltc-segmented[data-cltc-range-switching="true"] button[data-active="true"] {
+          transition: none;
+          opacity: 1;
+          transform: none;
+        }
+        .cltc-settings-overlay .cltc-toggle-field input,
+        .cltc-settings-overlay .cltc-toggle-field input:active,
+        .cltc-settings-overlay .cltc-toggle-field input::after,
+        .cltc-settings-overlay .cltc-profile-select,
+        .cltc-settings-overlay .cltc-price-input,
+        .cltc-settings-overlay .cltc-profile-select::picker-icon {
+          transition: none;
+          transform: none;
+        }
+        .cltc-settings-overlay .cltc-profile-save-toast {
+          transform: translate(-50%, 0);
+          transition: opacity var(--cltc-duration-press) var(--cltc-ease-out), visibility 0s linear var(--cltc-duration-press);
         }
       }
       .cltc-header-settings {
+        --cltc-ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+        --cltc-duration-press: 160ms;
         --cltc-muted: var(--color-token-text-tertiary, light-dark(#6b7280, #a1a1aa));
         --cltc-hover: var(--color-token-list-hover-background, light-dark(rgba(0, 0, 0, .06), rgba(255, 255, 255, .08)));
         box-sizing: border-box;
@@ -6238,7 +6346,6 @@
         z-index: 2147483647;
         margin-left: 0;
       }
-      .cltc-header-settings:hover,
       .cltc-header-settings:focus-visible {
         background: var(--cltc-hover);
         outline: none;
@@ -6279,10 +6386,7 @@
 
   function handleSettingsClick(event) {
     if (event.target?.classList?.contains("cltc-settings-overlay")) {
-      state.priceEditorOpen = false;
-      state.analyticsModel = "";
-      state.analyticsModelsExpanded = false;
-      render(true);
+      closeSettingsEditor();
       return;
     }
     const panelButton = event.target.closest?.("[data-settings-panel]");
@@ -6290,7 +6394,7 @@
       const panel = panelButton.getAttribute("data-settings-panel") || "";
       if (["profile", "general", "usage", "pricing"].includes(panel)) {
         state.settingsPanel = panel;
-        renderSettingsOverlay(liveSnapshot());
+        renderSettingsOverlay(liveSnapshot(), { animate: true });
         if (panel === "usage") void refreshUsageAnalyticsFromHelper();
       }
       return;
@@ -6298,7 +6402,7 @@
     const presetButton = event.target.closest?.("button[data-analytics-preset]");
     if (presetButton) {
       state.analyticsPreset = presetButton.getAttribute("data-analytics-preset") || "today";
-      renderSettingsOverlay(liveSnapshot());
+      renderSettingsOverlay(liveSnapshot(), { animate: true, analyticsRange: true });
       return;
     }
     if (event.target.closest?.("[data-action='open-analytics-calendar']")) {
@@ -6308,23 +6412,23 @@
     const metricButton = event.target.closest?.("[data-analytics-metric]");
     if (metricButton) {
       state.analyticsMetric = metricButton.getAttribute("data-analytics-metric") === "cost" ? "cost" : "tokens";
-      renderSettingsOverlay(liveSnapshot());
+      renderSettingsOverlay(liveSnapshot(), { animate: true });
       return;
     }
     const modelButton = event.target.closest?.("[data-analytics-model]");
     if (modelButton) {
       state.analyticsModel = modelButton.getAttribute("data-analytics-model") || "";
-      renderSettingsOverlay(liveSnapshot());
+      renderSettingsOverlay(liveSnapshot(), { animate: true });
       return;
     }
     if (event.target.closest?.("[data-action='clear-analytics-model']")) {
       state.analyticsModel = "";
-      renderSettingsOverlay(liveSnapshot());
+      renderSettingsOverlay(liveSnapshot(), { animate: true });
       return;
     }
     if (event.target.closest?.("[data-action='toggle-analytics-models']")) {
       state.analyticsModelsExpanded = !state.analyticsModelsExpanded;
-      renderSettingsOverlay(liveSnapshot());
+      renderSettingsOverlay(liveSnapshot(), { animate: true });
       return;
     }
     const picked = event.target.closest?.("[data-price-pick]");
@@ -6338,7 +6442,7 @@
     }
     if (picked) {
       state.priceEditorModel = picked.getAttribute("data-price-pick") || "";
-      renderSettingsOverlay(liveSnapshot());
+      renderSettingsOverlay(liveSnapshot(), { animate: true });
       return;
     }
     if (event.target.closest?.("[data-action='save-profile']")) {
@@ -6357,7 +6461,7 @@
     }
     if (event.target.closest?.("[data-action='reset-price']")) {
       restoreDefaultPrices();
-      renderSettingsOverlay(liveSnapshot());
+      renderSettingsOverlay(liveSnapshot(), { animate: true });
       return;
     }
     if (event.target.closest?.("[data-action='new-price']")) {
@@ -6365,10 +6469,7 @@
       return;
     }
     if (event.target.closest?.("[data-action='close-price']")) {
-      state.priceEditorOpen = false;
-      state.analyticsModel = "";
-      state.analyticsModelsExpanded = false;
-      render(true);
+      closeSettingsEditor();
       return;
     }
   }
@@ -6411,7 +6512,7 @@
     hidden.add(name);
     saveHiddenPriceModels(hidden);
     state.priceEditorModel = nextPriceEditorModel(modelName());
-    renderSettingsOverlay(liveSnapshot());
+    renderSettingsOverlay(liveSnapshot(), { animate: true });
     return true;
   }
 
@@ -6428,7 +6529,7 @@
 
   function startNewPriceModel() {
     state.priceEditorModel = newPriceModelName();
-    renderSettingsOverlay(liveSnapshot());
+    renderSettingsOverlay(liveSnapshot(), { animate: true });
   }
 
   function savePriceFromEditor() {
@@ -6449,13 +6550,50 @@
     return saved;
   }
 
+  function profileSaveToastHtml() {
+    const visible = Boolean(state.profileSaveStatus);
+    const tone = state.profileSaveStatusTone === "error" ? "error" : visible ? "success" : "neutral";
+    return `<div class="cltc-profile-save-toast" data-field="profile-save-status" data-visible="${String(visible)}" data-tone="${tone}" role="status" aria-live="polite">${escapeHtml(state.profileSaveStatus || "")}</div>`;
+  }
+
+  function renderProfileSaveToast() {
+    const toast = state.settingsOverlay?.querySelector?.("[data-field='profile-save-status']");
+    if (!toast) return false;
+    const visible = Boolean(state.profileSaveStatus);
+    toast.textContent = state.profileSaveStatus || "";
+    toast.dataset.visible = String(visible);
+    toast.dataset.tone = state.profileSaveStatusTone || "neutral";
+    return true;
+  }
+
+  function setProfileSaveStatus(message, tone) {
+    if (state.profileSaveStatusTimer) window.clearTimeout(state.profileSaveStatusTimer);
+    state.profileSaveStatus = normalizeText(message, 160);
+    state.profileSaveStatusTone = tone === "error" ? "error" : "success";
+    state.profileSaveStatusTimer = window.setTimeout(() => {
+      state.profileSaveStatusTimer = 0;
+      state.profileSaveStatus = "";
+      state.profileSaveStatusTone = "";
+      if (!renderProfileSaveToast()) render();
+    }, PROFILE_SAVE_STATUS_DURATION_MS);
+  }
+
+  function syncProfileSaveStatus(options = {}) {
+    if (options.render === false) return;
+    if (!renderProfileSaveToast()) render();
+  }
+
   function saveProfilePrefsFromEditor(rootOverride, options = {}) {
     const root = rootOverride || settingsEditorRoot();
     if (!root) return false;
     const emailField = root.querySelector("[data-profile-field='email']");
     if (!emailField) return false;
     const email = normalizeText(emailField.value, 128);
-    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return false;
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setProfileSaveStatus("邮箱格式无效", "error");
+      syncProfileSaveStatus(options);
+      return false;
+    }
     const planType = root.querySelector("[data-profile-field='planType']")?.value;
     const planCustom = root.querySelector("[data-profile-field='planCustom']")?.value;
     const accountStructure = root.querySelector("[data-profile-field='accountStructure']")?.value;
@@ -6470,28 +6608,48 @@
       planType: plan.planType,
       planLabel: plan.planLabel,
     }, { profileEditor: true });
-    syncOpenProfileAccountMenuIdentity();
-    if (options.render !== false) render();
+    setProfileSaveStatus("已保存", "success");
+    syncProfileSaveStatus(options);
     return true;
   }
 
   function setCcSwitchSyncStatus(message) {
     state.ccSwitchSyncStatus = normalizeText(message, 160);
     const status = settingsEditorRoot()?.querySelector("[data-field='cc-switch-sync-status']");
-    if (status) status.textContent = state.ccSwitchSyncStatus;
+    if (!status) return;
+    status.textContent = state.ccSwitchSyncStatus;
+    pulseSettingsStatus(status);
+  }
+
+  function pulseSettingsStatus(node) {
+    if (!node) return;
+    if (state.settingsStatusPulseFrame) {
+      if (typeof window.cancelAnimationFrame === "function") window.cancelAnimationFrame(state.settingsStatusPulseFrame);
+      state.settingsStatusPulseFrame = 0;
+    }
+    node.dataset.cltcStatusPulse = "true";
+    void node.offsetWidth;
+    if (typeof window.requestAnimationFrame !== "function") {
+      node.removeAttribute?.("data-cltc-status-pulse");
+      return;
+    }
+    state.settingsStatusPulseFrame = window.requestAnimationFrame(() => {
+      state.settingsStatusPulseFrame = 0;
+      node.removeAttribute?.("data-cltc-status-pulse");
+    });
   }
 
   async function syncCcSwitchFromSettings() {
     const button = settingsEditorRoot()?.querySelector("[data-action='sync-cc-switch']");
     if (button) button.disabled = true;
     setCcSwitchSyncStatus("正在同步 CC Switch...");
-    const result = await syncCcSwitchUsageFromHelper();
+    const result = await syncCcSwitchUsageFromHelper({ refresh: true });
     if (result.ok) {
       const imported = toCount(result.imported);
       const total = toCount(result.total ?? result.seen ?? result.rows);
       const suffix = total ? ` / ${fmtCount(total)} 条` : "";
+      renderSettingsOverlay(liveSnapshot());
       setCcSwitchSyncStatus(`已同步 ${fmtCount(imported)} 条${suffix}`);
-      render(true);
     } else if (result.skipped) {
       setCcSwitchSyncStatus(result.helperUnavailable ? "同步已跳过：helper 不可用，本地统计继续可用" : "同步已跳过：已有同步任务正在执行");
     } else if (result.helperUnavailable) {
@@ -6553,6 +6711,7 @@
           <label class="cltc-price-field cltc-price-field-full">
             <span>邮箱</span>
             <input class="cltc-price-input" data-profile-field="email" type="email" value="${escapeHtml(prefs.email)}">
+            <small class="cltc-profile-field-note">官方新版本的账号菜单不再显示邮箱；这里修改的是本地伪装资料。</small>
           </label>
           <label class="cltc-price-field">
             <span>账号类型</span>
@@ -6677,6 +6836,7 @@
           </div>
         </div>
       </div>
+      ${profileSaveToastHtml()}
     `;
   }
 
@@ -7012,27 +7172,124 @@
     next?.focus?.();
   }
 
-  function renderSettingsOverlay(snap) {
-    if (!state.priceEditorOpen) {
-      destroyAnalyticsCalendar();
-      stopAnalyticsTimer();
-      state.settingsOverlay?.remove?.();
-      state.settingsOverlay = null;
+  function handleSettingsKeydown(event) {
+    if (event.key === "Escape") {
+      event.preventDefault?.();
+      closeSettingsEditor();
       return;
     }
+    handleAnalyticsKeydown(event);
+  }
+
+  const SETTINGS_FOCUS_ATTRIBUTES = [
+    "data-settings-panel",
+    "data-price-pick",
+    "data-action",
+    "data-profile-field",
+    "data-price-field",
+    "data-analytics-preset",
+    "data-analytics-metric",
+    "data-analytics-model",
+    "data-chart-index",
+  ];
+  const SETTINGS_FOCUS_SELECTOR = SETTINGS_FOCUS_ATTRIBUTES.map((attribute) => `[${attribute}]`).join(",");
+
+  function settingsFocusKey(node, root) {
+    if (!node || !root?.contains?.(node)) return null;
+    const focusable = node.getAttribute ? node : node.closest?.(SETTINGS_FOCUS_SELECTOR);
+    if (!focusable) return null;
+    for (const attribute of SETTINGS_FOCUS_ATTRIBUTES) {
+      const value = focusable.getAttribute?.(attribute);
+      if (value != null) return { attribute, value };
+    }
+    return null;
+  }
+
+  function isSettingsFocusable(node) {
+    if (!node || node.disabled) return false;
+    const tabIndex = node.getAttribute?.("tabindex");
+    if (tabIndex != null) return Number(tabIndex) >= 0;
+    return /^(A|BUTTON|INPUT|SELECT|TEXTAREA)$/.test(String(node.tagName || ""));
+  }
+
+  function restoreSettingsFocus(root, key) {
+    if (!root || !key) return;
+    const target = Array.from(root.querySelectorAll?.(SETTINGS_FOCUS_SELECTOR) || []).find(
+      (node) => node.getAttribute?.(key.attribute) === key.value && isSettingsFocusable(node),
+    );
+    target?.focus?.();
+  }
+
+  function cancelSettingsFocusFrame() {
+    if (state.settingsFocusFrame && typeof window.cancelAnimationFrame === "function") {
+      window.cancelAnimationFrame(state.settingsFocusFrame);
+    }
+    state.settingsFocusFrame = 0;
+  }
+
+  function renderSettingsOverlay(snap, options = {}) {
+    const animate = options.animate === true;
+    const animateAnalyticsRange = options.analyticsRange === true;
+    if (state.analyticsRangeSwitchFrame) {
+      if (typeof window.cancelAnimationFrame === "function") window.cancelAnimationFrame(state.analyticsRangeSwitchFrame);
+      state.analyticsRangeSwitchFrame = 0;
+    }
+    if (state.analyticsRangeSwitchTimer) {
+      window.clearTimeout(state.analyticsRangeSwitchTimer);
+      state.analyticsRangeSwitchTimer = 0;
+    }
+    if (!state.priceEditorOpen) {
+      cancelSettingsFocusFrame();
+      destroyAnalyticsCalendar();
+      stopAnalyticsTimer();
+      const overlay = state.settingsOverlay;
+      if (!overlay) return;
+      if (overlay.dataset.cltcClosing === "true") return;
+      const modal = overlay.querySelector?.(".cltc-settings-modal");
+      if (!modal) {
+        overlay.remove?.();
+        state.settingsOverlay = null;
+        return;
+      }
+      overlay.dataset.cltcClosing = "true";
+      const remove = () => {
+        state.settingsOverlayCloseTimer = 0;
+        if (state.priceEditorOpen || state.settingsOverlay !== overlay) return;
+        overlay.remove?.();
+        state.settingsOverlay = null;
+        state.settingsButton?.focus?.();
+      };
+      state.settingsOverlayCloseTimer = window.setTimeout(remove, SETTINGS_MODAL_EXIT_MS);
+      return;
+    }
+    if (state.settingsOverlayCloseTimer) {
+      window.clearTimeout(state.settingsOverlayCloseTimer);
+      state.settingsOverlayCloseTimer = 0;
+    }
+    state.settingsOverlay?.removeAttribute?.("data-cltc-closing");
+    let entering = false;
     if (!state.settingsOverlay) {
+      entering = true;
       for (const node of Array.from(document.querySelectorAll?.(".cltc-settings-overlay") || [])) node.remove?.();
       state.settingsOverlay = document.createElement("div");
       state.settingsOverlay.className = "cltc-settings-overlay";
+      state.settingsOverlay.dataset.cltcEntering = "true";
       state.settingsOverlay.addEventListener("click", handleSettingsClick);
       state.settingsOverlay.addEventListener("change", handleSettingsChange);
-      state.settingsOverlay.addEventListener("keydown", handleAnalyticsKeydown);
+      state.settingsOverlay.addEventListener("keydown", handleSettingsKeydown);
     }
     for (const node of Array.from(document.querySelectorAll?.(".cltc-settings-overlay") || [])) {
       if (node !== state.settingsOverlay) node.remove?.();
     }
     if (!state.settingsOverlay.isConnected) (document.body || document.documentElement)?.appendChild(state.settingsOverlay);
+    if (entering) {
+      const overlay = state.settingsOverlay;
+      const settle = () => overlay?.removeAttribute("data-cltc-entering");
+      if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(settle);
+      else settle();
+    }
     if (state.analyticsCalendar?.isOpen) return;
+    const focusKey = settingsFocusKey(document.activeElement, state.settingsOverlay);
     const contentScrollTop = state.settingsOverlay.querySelector(".cltc-settings-content")?.scrollTop || 0;
     const listScrollTop = state.settingsOverlay.querySelector(".cltc-price-list")?.scrollTop || 0;
     state.settingsOverlay.innerHTML = pricePopoverHtml(snap);
@@ -7040,6 +7297,47 @@
     const list = state.settingsOverlay.querySelector(".cltc-price-list");
     if (content) content.scrollTop = contentScrollTop;
     if (list) list.scrollTop = listScrollTop;
+    if (focusKey) cancelSettingsFocusFrame();
+    else if (
+      state.settingsFocusFrame &&
+      document.activeElement !== document.body &&
+      !state.settingsOverlay.contains?.(document.activeElement)
+    ) {
+      cancelSettingsFocusFrame();
+    }
+    restoreSettingsFocus(state.settingsOverlay, focusKey);
+    if (focusKey) {
+      const focusRoot = state.settingsOverlay;
+      const restoreFocus = () => {
+        state.settingsFocusFrame = 0;
+        if (state.settingsOverlay === focusRoot && focusRoot?.isConnected) restoreSettingsFocus(focusRoot, focusKey);
+      };
+      if (typeof window.requestAnimationFrame === "function") state.settingsFocusFrame = window.requestAnimationFrame(restoreFocus);
+      else restoreFocus();
+    }
+    if (animateAnalyticsRange) {
+      const rangeGroup = state.settingsOverlay.querySelector(".cltc-analytics-toolbar .cltc-segmented");
+      if (rangeGroup) {
+        const settle = () => {
+          state.analyticsRangeSwitchTimer = 0;
+          rangeGroup.removeAttribute("data-cltc-range-switching");
+        };
+        const activate = () => {
+          state.analyticsRangeSwitchFrame = 0;
+          rangeGroup.dataset.cltcRangeSwitching = "true";
+          void rangeGroup.offsetWidth;
+          state.analyticsRangeSwitchTimer = window.setTimeout(settle, SETTINGS_MODAL_EXIT_MS);
+        };
+        if (typeof window.requestAnimationFrame === "function") state.analyticsRangeSwitchFrame = window.requestAnimationFrame(activate);
+        else activate();
+      }
+    }
+    if (animate && content) {
+      content.dataset.cltcSwitching = "true";
+      const settle = () => content.removeAttribute("data-cltc-switching");
+      if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(settle);
+      else settle();
+    }
     syncAnalyticsTimer();
   }
 
@@ -7118,13 +7416,18 @@
     stack.dataset.animate = shouldAnimate ? "true" : "false";
     if (!shouldAnimate) {
       stack.style.transform = `translateY(${toY})`;
+      stack.style.willChange = "";
       stack.dataset.animate = "false";
       return;
     }
-    window.requestAnimationFrame?.(() => {
+    stack.style.willChange = "transform";
+    const settle = () => {
       stack.style.transform = `translateY(${toY})`;
+      stack.style.willChange = "";
       stack.dataset.animate = "false";
-    });
+    };
+    if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(settle);
+    else settle();
   }
 
   function createRollingSeparator(char) {
@@ -7299,7 +7602,7 @@
       <span class="cltc-pill">缓存 ${valueSlot("session-cached")} (${valueSlot("session-cache-percent")})</span>
       <span class="cltc-pill">花费 ${valueSlot("session-cost")}${textSlot("session-priced-label")}</span>
       <span class="cltc-pill">今日 ${valueSlot("day-cost")}${textSlot("day-priced-label")}</span>
-      <span class="cltc-pill" data-cltc-model-pill="true"><span class="cltc-model-label">${officialFastModeIconHtml()}<span class="cltc-model-text">${textSlot("model")}</span></span></span>
+      <span class="cltc-pill" data-cltc-model-pill="true"><span class="cltc-model-label">${officialFastModeIconHtml()}<span class="cltc-model-text">${textSlot("model")}<span class="cltc-model-effort" data-cltc-model-effort="true" data-cltc-text-key="model-effort"></span></span></span></span>
     `;
   }
 
@@ -7324,7 +7627,7 @@
     });
   }
 
-  function updateHubContent(root, snap, sessionPricedLabel, dayPricedLabel, effortLabel) {
+  function updateHubContent(root, snap, sessionPricedLabel, dayPricedLabel) {
     updateValueSlot(root, "current-input", fmtCount(snap.current.input));
     updateValueSlot(root, "current-output", fmtCount(snap.current.output));
     updateValueSlot(root, "session-total", fmtCount(snap.session.total));
@@ -7334,7 +7637,10 @@
     updateValueSlot(root, "day-cost", fmtMoney(snap.dayCost.value));
     updateTextSlot(root, "session-priced-label", sessionPricedLabel);
     updateTextSlot(root, "day-priced-label", dayPricedLabel);
-    updateTextSlot(root, "model", `${snap.model}${effortLabel}`);
+    updateTextSlot(root, "model", snap.model);
+    updateTextSlot(root, "model-effort", snap.modelInfo.effort || "");
+    const effortNode = root.querySelector?.("[data-cltc-model-effort='true']");
+    if (effortNode) effortNode.dataset.effort = snap.modelInfo.effort || "";
     const modelPill = root.querySelector?.("[data-cltc-model-pill='true']");
     if (modelPill) modelPill.removeAttribute("title");
     const fastIcon = root.querySelector?.("[data-cltc-fast-mode-icon='true']");
@@ -7357,14 +7663,13 @@
     updateHeaderSettingsButton(snap);
     const sessionPricedLabel = costPricedLabel(snap.sessionCost, snap.session);
     const dayPricedLabel = costPricedLabel(snap.dayCost, snap.dayUsage);
-    const effortLabel = snap.modelInfo.effort ? ` · ${snap.modelInfo.effort}` : "";
     root.dataset.running = String(snap.running);
     ensureHubSkeleton(root);
-    updateHubContent(root, snap, sessionPricedLabel, dayPricedLabel, effortLabel);
-    syncCadencedShimmer(snap.running);
-    syncHubVisibility(root);
-    renderSettingsOverlay(snap);
-  }
+    updateHubContent(root, snap, sessionPricedLabel, dayPricedLabel);
+      syncCadencedShimmer(snap.running);
+      syncHubVisibility(root);
+      if (!state.settingsOverlay?.isConnected || !state.priceEditorOpen) renderSettingsOverlay(snap);
+    }
 
   function scheduleRender(delay = 0) {
     if (state.renderTimer) return;
@@ -7521,36 +7826,61 @@
         if (timer) window.clearTimeout(timer);
         window.removeEventListener?.("message", handler, true);
       };
-      const handler = (event) => {
-        const data = event?.data;
-        if (!data || data.requestId !== requestId || data.type !== "fetch-response") return;
+      const settle = (data) => {
+        if (!data || data.requestId !== requestId || data.type !== "fetch-response") return false;
         cleanup();
         if (data.responseType !== "success" || toCount(data.status) >= 400) {
           reject(new Error(`helper bridge fetch failed: ${data.status || data.responseType || "unknown"}`));
-          return;
+          return true;
         }
         try {
           resolve(JSON.parse(data.bodyJsonString || "{}"));
         } catch (error) {
           reject(error);
         }
+        return true;
+      };
+      const handler = (event) => {
+        settle(event?.data);
       };
       window.addEventListener?.("message", handler, true);
       timer = window.setTimeout(() => {
         cleanup();
         reject(new Error("helper bridge fetch timeout"));
       }, 3000);
-      Promise.resolve(bridge.sendMessageFromView({ type: "fetch", method: "GET", url, requestId })).catch((error) => {
-        cleanup();
-        reject(error);
-      });
+      Promise.resolve(bridge.sendMessageFromView({ type: "fetch", method: "GET", url, requestId }))
+        .then(settle)
+        .catch((error) => {
+          cleanup();
+          reject(error);
+        });
     });
+  }
+
+  async function helperJsonViaBridgeWithRetry(url) {
+    let lastError = null;
+    for (const delay of HELPER_BRIDGE_RETRY_DELAYS_MS) {
+      if (delay > 0) await new Promise((resolve) => window.setTimeout(resolve, delay));
+      try {
+        return await helperJsonViaBridge(url);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError || new Error("helper bridge unavailable");
+  }
+
+  function isCodexAppDocument() {
+    const protocol = String(window.location?.protocol || "").toLowerCase();
+    const href = String(window.location?.href || "").toLowerCase();
+    return protocol === "app:" || href.startsWith("app://");
   }
 
   async function helperJson(url) {
     try {
-      return await helperJsonViaBridge(url);
-    } catch {
+      return await helperJsonViaBridgeWithRetry(url);
+    } catch (error) {
+      if (isCodexAppDocument()) throw new Error("helper bridge unavailable in app document");
       const response = await window.fetch(url, { cache: "no-store" });
       if (!response?.ok) throw new Error(`helper fetch failed: ${response?.status || 0}`);
       return response.json();
@@ -7575,6 +7905,26 @@
     }
   }
 
+  function helperRefreshDelay(options = {}) {
+    const value = Number(options.pollIntervalMs);
+    return Number.isFinite(value) && value >= 0 ? value : HELPER_REFRESH_POLL_INTERVAL_MS;
+  }
+
+  function waitForHelperRefresh(options = {}) {
+    return new Promise((resolve) => window.setTimeout(resolve, helperRefreshDelay(options)));
+  }
+
+  async function helperJsonUntilReady(requestUrl, readyUrl, options = {}) {
+    let payload = await helperJson(requestUrl);
+    const maxPollsValue = Number(options.maxPolls);
+    const maxPolls = Number.isFinite(maxPollsValue) ? Math.max(0, Math.round(maxPollsValue)) : HELPER_REFRESH_MAX_POLLS;
+    for (let attempt = 0; payload?.refreshing && attempt < maxPolls; attempt += 1) {
+      await waitForHelperRefresh(options);
+      payload = await helperJson(readyUrl);
+    }
+    return payload;
+  }
+
   async function pollLocalHelperStats(options = {}) {
     if (state.helperPollInFlight) return state.helperPollPromise;
     if (typeof window.fetch !== "function") {
@@ -7584,7 +7934,13 @@
     state.helperPollInFlight = true;
     state.helperPollPromise = (async () => {
       try {
-        return mergeHelperStats(await helperJson(options.refresh ? HELPER_STATS_REFRESH_URL : HELPER_STATS_URL));
+        const payload = await helperJsonUntilReady(
+          options.refresh ? HELPER_STATS_REFRESH_URL : HELPER_STATS_URL,
+          HELPER_STATS_URL,
+          options,
+        );
+        if (payload?.refreshing) return false;
+        return mergeHelperStats(payload);
       } catch {
         // Helper is optional. Missing helper must not break Codex.
         setHelperStatus(HELPER_STATUS_DEGRADED, true);
@@ -7597,25 +7953,65 @@
     return state.helperPollPromise;
   }
 
-  async function syncCcSwitchUsageFromHelper() {
-    if (state.ccSwitchSyncInFlight) return { ok: false, skipped: true };
+  async function syncCcSwitchUsageFromHelper(options = {}) {
+    if (state.ccSwitchSyncInFlight) {
+      if (!options.refresh) return state.ccSwitchSyncPromise || { ok: false, skipped: true };
+      const inFlightPromise = state.ccSwitchSyncPromise;
+      if (inFlightPromise) await inFlightPromise;
+      if (state.ccSwitchSyncInFlight) return { ok: false, skipped: true, refreshing: true };
+    }
     if (typeof window.fetch !== "function") {
       setHelperStatus(HELPER_STATUS_CC_SWITCH_DEGRADED, true);
       return { ok: false, skipped: true, helperUnavailable: true };
     }
     state.ccSwitchSyncInFlight = true;
+    state.ccSwitchSyncPromise = (async () => {
+      try {
+        const payload = await helperJsonUntilReady(
+          options.refresh ? CC_SWITCH_TURNS_REFRESH_URL : CC_SWITCH_TURNS_URL,
+          CC_SWITCH_TURNS_URL,
+          options,
+        );
+        if (payload?.refreshing) return { ok: false, skipped: true, refreshing: true };
+        const turns = Array.isArray(payload?.turns) ? payload.turns : [];
+        const result = importLocalUsageTurns(turns, { replaceSource: "cc-switch" });
+        setHelperStatus(HELPER_STATUS_CONNECTED, false);
+        return { ok: true, ...result };
+      } catch (error) {
+        setHelperStatus(HELPER_STATUS_CC_SWITCH_DEGRADED, true);
+        return { ok: false, helperUnavailable: true, error: error?.message || String(error) };
+      }
+    })();
     try {
-      const payload = await helperJson(CC_SWITCH_TURNS_URL);
-      const turns = Array.isArray(payload?.turns) ? payload.turns : [];
-      const result = importLocalUsageTurns(turns, { replaceSource: "cc-switch" });
-      setHelperStatus(HELPER_STATUS_CONNECTED, false);
-      return { ok: true, ...result };
-    } catch (error) {
-      setHelperStatus(HELPER_STATUS_CC_SWITCH_DEGRADED, true);
-      return { ok: false, helperUnavailable: true, error: error?.message || String(error) };
+      return await state.ccSwitchSyncPromise;
     } finally {
       state.ccSwitchSyncInFlight = false;
+      state.ccSwitchSyncPromise = null;
     }
+  }
+
+  function refreshProfileData(options = {}) {
+    if (state.profileDataRefreshPromise) return state.profileDataRefreshPromise;
+    const attemptedAt = toCount(state.profileDataRefreshAttemptAt);
+    if (!options.force && attemptedAt && Date.now() - attemptedAt < PROFILE_DATA_REFRESH_MIN_INTERVAL_MS) {
+      return Promise.resolve({ ok: false, skipped: true });
+    }
+    state.profileDataRefreshAttemptAt = Date.now();
+    const refreshOptions = { ...options, refresh: true };
+    state.profileDataRefreshPromise = Promise.all([
+      pollLocalHelperStats(refreshOptions),
+      syncCcSwitchUsageFromHelper(refreshOptions),
+    ])
+      .then(([helperStats, ccSwitch]) => {
+        const ok = helperStats === true && ccSwitch?.ok === true && !ccSwitch?.error;
+        if (ok) state.profileDataRefreshAt = Date.now();
+        return { ok, helperStats, ccSwitch };
+      })
+      .catch((error) => ({ ok: false, error: error?.message || String(error) }))
+      .finally(() => {
+        state.profileDataRefreshPromise = null;
+      });
+    return state.profileDataRefreshPromise;
   }
 
   async function refreshUsageAnalyticsFromHelper() {
@@ -7677,9 +8073,24 @@
   function destroy() {
     state.started = false;
     if (state.renderTimer) window.clearTimeout(state.renderTimer);
+    if (state.profileSaveStatusTimer) window.clearTimeout(state.profileSaveStatusTimer);
+    if (state.settingsOverlayCloseTimer) window.clearTimeout(state.settingsOverlayCloseTimer);
+    if (state.settingsStatusPulseFrame && typeof window.cancelAnimationFrame === "function") {
+      window.cancelAnimationFrame(state.settingsStatusPulseFrame);
+    }
+    cancelSettingsFocusFrame();
+    if (state.analyticsRangeSwitchFrame && typeof window.cancelAnimationFrame === "function") {
+      window.cancelAnimationFrame(state.analyticsRangeSwitchFrame);
+    }
+    if (state.analyticsRangeSwitchTimer) window.clearTimeout(state.analyticsRangeSwitchTimer);
     if (state.profileIdentitySyncTimer) window.clearTimeout(state.profileIdentitySyncTimer);
     if (state.profileUsageRefreshTimer) window.clearTimeout(state.profileUsageRefreshTimer);
     if (state.hubVisibilityTimer) window.clearTimeout(state.hubVisibilityTimer);
+    state.profileSaveStatusTimer = 0;
+    state.settingsOverlayCloseTimer = 0;
+    state.settingsStatusPulseFrame = 0;
+    state.analyticsRangeSwitchFrame = 0;
+    state.analyticsRangeSwitchTimer = 0;
     stopAnalyticsTimer();
     destroyAnalyticsCalendar();
     state.hubVisibilityObserver?.disconnect?.();
@@ -7692,6 +8103,12 @@
     state.officialModelTrigger = null;
     state.taskRunningObserver = null;
     state.hubVisibilityObserver = null;
+    state.profileQueryClient = null;
+    state.profileAccountsRefreshPromise = null;
+    state.profileDataRefreshAttemptAt = 0;
+    state.profileDataRefreshAt = 0;
+    state.profileDataRefreshPromise = null;
+    state.ccSwitchSyncPromise = null;
     if (state.profileAvatarRenderUrl?.startsWith?.("blob:")) {
       try {
         URL.revokeObjectURL(state.profileAvatarRenderUrl);
@@ -7774,6 +8191,7 @@
     usage: localUsageExport,
     importLocalUsageTurns,
     syncCcSwitchUsageFromHelper,
+    refreshProfileData,
     mergeHelperStats,
     debugSessionState,
     openAnalyticsCalendar,
@@ -7868,13 +8286,17 @@
       rememberPendingInput,
       startTurnShimmer,
       stopTurnShimmer,
+      updateValueSlot,
       rememberLocalUsage,
       persistLocalCurrentTurn,
       importLocalUsageTurns,
       syncCcSwitchUsageFromHelper,
+      refreshProfileData,
+      helperJson,
       mergeHelperStats,
       normalizeHelperStatsPayload,
       saveProfilePrefsFromEditor,
+      profileSaveToastHtml,
       syncCcSwitchFromSettings,
       ccSwitchSettingsHtml,
       helperStatusText,
@@ -7910,6 +8332,10 @@
       profileReactAssetUrl,
       profileReactFromModule,
       profileAuthContextFromModule,
+      isProfileQueryClient,
+      profileQueryClientFromFiberNode,
+      chainProfileQueryRefresh,
+      invalidateProfileQueryWithClient,
       profileUnlockedSettingsSections,
       profileUsernameAllowed,
       applyLocalProfilePatch,
@@ -7920,7 +8346,6 @@
       localProfileResponse,
       isProfileFetchMessage,
       syncSidebarProfileIdentity,
-      syncOpenProfileAccountMenuIdentity,
       syncVisibleProfilePhotoIdentity,
       syncProfileIdentity,
       installLocalMessageCapture,

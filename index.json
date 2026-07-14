@@ -135,11 +135,11 @@
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/bennett-ui-improvements.js",
       "sha256": "087a96fd4b407eb86c15e21cf7612debd7c27575638f64b840322e43675aef5d"
     },
-    {
-      "id": "codex-live-token-cost",
-      "name": "Codex Live Token Cost",
-      "description": "在输入框上方显示 token 和费用，解锁本地 Profile 统计，可选 helper 同步 CC Switch。",
-      "version": "0.7.0",
+      {
+        "id": "codex-live-token-cost",
+        "name": "Codex Live Token Cost",
+        "description": "在输入框上方显示 token 和费用，解锁本地 Profile 统计，可选 helper 同步 CC Switch。",
+        "version": "0.7.1",
       "author": "Tianzora",
       "tags": [
         "codex",
@@ -149,7 +149,7 @@
       ],
       "homepage": "https://github.com/Tianzora/codex-token-cost",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-live-token-cost.js",
-      "sha256": "0546cfc051875652b5ccc631e16e9f28333741e1eccb75c3c4d83bf0edac92ac"
+        "sha256": "7c5acdfeafea6f32e5c420df3e2a182c7d3a541ea3d64932177e277dc42a9c8d"
     }
   ]
 }
