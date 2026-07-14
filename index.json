@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-07-06T08:45:38.039Z",
+  "updated_at": "2026-07-14T07:37:22.000Z",
   "scripts": [
     {
       "id": "codex-context-used-meter",
@@ -33,6 +33,24 @@
       "homepage": "https://github.com/0xTotoroX/codex-hide-usage-alert",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/hide-usage-alert.js",
       "sha256": "a120c224c9c7e1de25a3c2f0614fbd144842d75aa4569f9a40074da7795f74e5"
+    },
+    {
+      "id": "model-deck",
+      "name": "Model Deck",
+      "description": "悬停官方模型按钮打开模型矩阵，提供 Fast 切换和全局预设",
+      "version": "0.1.0",
+      "author": "0xTotoroX",
+      "tags": [
+        "codex",
+        "models",
+        "reasoning",
+        "fast",
+        "presets",
+        "ui"
+      ],
+      "homepage": "https://github.com/0xTotoroX/model-deck",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/model-deck.js",
+      "sha256": "6a085811d626bbe9ded8e73baf9fbaf719f30297e0ce58c35259a083a056ad2d"
     },
     {
       "id": "codex-token-usage",
