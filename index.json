@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-07-06T08:45:38.039Z",
+  "updated_at": "2026-07-14T12:00:55.732Z",
   "scripts": [
     {
       "id": "codex-context-used-meter",
@@ -134,6 +134,25 @@
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/bennett-ui-improvements.js",
       "sha256": "087a96fd4b407eb86c15e21cf7612debd7c27575638f64b840322e43675aef5d"
+    },
+    {
+      "id": "prompt-optimize",
+      "name": "Prompt Optimize",
+      "description": "在输入框旁调用外部 LLM 一键优化提示词，支持 OpenAI/Anthropic 兼容 API 与一键还原。",
+      "version": "1.0.0",
+      "author": "Codex++ Community",
+      "tags": [
+        "prompt",
+        "ui",
+        "productivity",
+        "optimize",
+        "llm",
+        "openai",
+        "anthropic"
+      ],
+      "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/prompt-optimize.js",
+      "sha256": "1993a9d5e3717b0d62edd9d1d9933ef2a1d0bd04cc122781032b8c7fc57a49b7"
     }
   ]
 }
