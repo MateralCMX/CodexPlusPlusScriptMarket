@@ -86,7 +86,9 @@
       const status = await callBridge("/provider-guard/status", {});
       renderStatus(status && typeof status === "object" ? status : {});
     } catch (error) {
-      renderError(error);
+      const fallback = await loadCompatibilityStatus(error).catch(() => null);
+      if (fallback) renderStatus(fallback);
+      else renderError(error);
     } finally {
       checking = false;
       refreshButton.disabled = false;
@@ -143,6 +145,42 @@
     );
   }
 
+  async function loadCompatibilityStatus(originalError) {
+    const [catalog, backend] = await Promise.all([
+      callBridge("/codex-model-catalog", {}),
+      callBridge("/backend/status", {}).catch(() => ({})),
+    ]);
+    const currentProvider = safeText(catalog && catalog.model_provider);
+    const stable = currentProvider === "custom";
+    return {
+      level: stable ? "warning" : "critical",
+      currentProvider: currentProvider || "unknown",
+      stableProvider: "custom",
+      totalThreads: null,
+      endpoint: { kind: "compatibility", port: null },
+      providerBuckets: [],
+      findings: [
+        {
+          code: "compatibility_mode",
+          severity: "warning",
+          message: `当前 Codex++ ${safeText(backend && backend.version) || "版本"} 尚未提供完整 Provider Guard 后端；现在只检查 model_provider，不读取 SQLite。`,
+        },
+        ...(stable
+          ? []
+          : [{
+              code: "unstable_current_provider",
+              severity: "critical",
+              message: `当前 model_provider 为 ${currentProvider || "unknown"}，建议保持为 custom 以避免会话被供应商筛选隐藏。`,
+            }]),
+        {
+          code: "backend_upgrade_required",
+          severity: "warning",
+          message: `完整会话分桶检查需要升级后的 Codex++ 后端。原始状态接口错误：${safeText(originalError && (originalError.message || originalError))}`,
+        },
+      ],
+    };
+  }
+
   function callBridge(path, payload) {
     if (typeof window.__codexSessionDeleteBridge !== "function") {
       return Promise.reject(new Error("Codex++ bridge unavailable"));
@@ -165,7 +203,7 @@
   }
 
   function safeNumber(value) {
-    return Number.isFinite(value) && value >= 0 ? String(Math.trunc(value)) : "0";
+    return Number.isFinite(value) && value >= 0 ? String(Math.trunc(value)) : "-";
   }
 
   function safeText(value) {
