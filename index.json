@@ -1,7 +1,24 @@
 {
   "version": 1,
-  "updated_at": "2026-07-06T08:45:38.039Z",
+  "updated_at": "2026-07-15T00:00:00.000Z",
   "scripts": [
+    {
+      "id": "codex-provider-guard",
+      "name": "Codex Provider Guard",
+      "description": "只读检查供应商 ID、会话分桶和本地端口风险；修复必须在 Codex++ 原生管理器中确认执行。",
+      "version": "1.0.0",
+      "author": "k9ight000",
+      "tags": [
+        "codex",
+        "provider",
+        "sessions",
+        "safety",
+        "cpa"
+      ],
+      "homepage": "https://github.com/BigPizzaV3/CodexPlusPlus",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-provider-guard.js",
+      "sha256": "07ad11064bad089918dbf3cefe2b5f1cdcfafeddd05cfe158cad5f9bdd43b939"
+    },
     {
       "id": "codex-context-used-meter",
       "name": "Codex Context Used Meter",
