@@ -52,7 +52,7 @@
     textContent: "此市场脚本只有只读检查权限。修复必须在 Codex++ 原生管理器中确认执行。",
   });
   const refreshButton = element("button", { type: "button", textContent: "重新检查" });
-  const managerButton = element("button", { type: "button", textContent: "打开管理器修复" });
+  const managerButton = element("button", { type: "button", textContent: "打开 Codex++ 管理器" });
   const actions = element("div", { className: "cpg-actions" }, [refreshButton, managerButton]);
   const launcher = element("button", { className: "cpg-launcher", type: "button", textContent: "会话保护" });
   body.append(metrics, findings, note);
@@ -84,6 +84,9 @@
     badge.dataset.level = "";
     try {
       const status = await callBridge("/provider-guard/status", {});
+      if (!status || typeof status !== "object" || !["ok", "warning", "critical"].includes(status.level)) {
+        throw new Error(safeText(status && status.message) || "Provider Guard backend is unavailable");
+      }
       renderStatus(status && typeof status === "object" ? status : {});
     } catch (error) {
       const fallback = await loadCompatibilityStatus(error).catch(() => null);
@@ -181,11 +184,23 @@
     };
   }
 
-  function callBridge(path, payload) {
+  function callBridge(path, payload, timeoutMs = 3000) {
     if (typeof window.__codexSessionDeleteBridge !== "function") {
       return Promise.reject(new Error("Codex++ bridge unavailable"));
     }
-    return window.__codexSessionDeleteBridge(path, payload);
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => reject(new Error(`Bridge request timed out: ${path}`)), timeoutMs);
+      window.__codexSessionDeleteBridge(path, payload).then(
+        (result) => {
+          window.clearTimeout(timer);
+          resolve(result);
+        },
+        (error) => {
+          window.clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
   }
 
   function metric(label, value) {

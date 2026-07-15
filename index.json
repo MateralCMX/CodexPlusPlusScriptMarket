@@ -6,7 +6,7 @@
       "id": "codex-provider-guard",
       "name": "Codex Provider Guard",
       "description": "只读检查供应商 ID、会话分桶和本地端口风险；修复必须在 Codex++ 原生管理器中确认执行。",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "author": "k9ight000",
       "tags": [
         "codex",
@@ -17,7 +17,7 @@
       ],
       "homepage": "https://github.com/BigPizzaV3/CodexPlusPlus",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-provider-guard.js",
-      "sha256": "f4ae43a527bd2770342b710a375393d86b69b0359bd1dda73031c772f1dcf5e7"
+      "sha256": "a047592791a2836fd1d665c7b0a8ca8f64a8924ee4b2a08f09e3c52b12dec5b1"
     },
     {
       "id": "codex-context-used-meter",
