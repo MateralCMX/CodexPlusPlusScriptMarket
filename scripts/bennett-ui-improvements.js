@@ -21,7 +21,7 @@
   "use strict";
 
   const INSTALL_KEY = "__bennettUiImprovementsBigPizza";
-  const VERSION = "1.0.6-bigpizza.1";
+  const VERSION = "1.0.9-bigpizza.1";
   const previous = window[INSTALL_KEY];
   if (previous && typeof previous.stop === "function") {
     try {
@@ -501,6 +501,15 @@ const FEATURES = {
       "aside.pointer-events-auto.relative.flex.overflow-hidden",
       "aside.pointer-events-auto.relative.flex.overflow-visible",
       "aside.pointer-events-auto.relative.flex",
+    ].join(", ");
+    const SIDEBAR_CANDIDATE_SELECTOR = [
+      ASIDE_SELECTOR,
+      "aside",
+      "nav",
+      "[role='navigation']",
+      "[data-testid*='sidebar' i]",
+      "[data-test*='sidebar' i]",
+      "[class*='sidebar' i]",
     ].join(", ");
 
     // ── parsing ────────────────────────────────────────────────────────
@@ -1126,14 +1135,87 @@ const FEATURES = {
       return (hasNewChat && hasSearch) || (hasSearch && hasProjectOrHistory);
     };
 
+    const quickControlText = (node) =>
+      [
+        node.getAttribute?.("aria-label"),
+        node.getAttribute?.("title"),
+        node.textContent,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+
+    const isSidebarGeometry = (node) => {
+      if (!(node instanceof HTMLElement) || !isVisibleElement(node)) return false;
+      const rect = node.getBoundingClientRect();
+      const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+      const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+      return (
+        rect.width >= 180 &&
+        rect.width <= Math.min(520, Math.max(320, viewportWidth * 0.55)) &&
+        rect.height >= Math.max(360, viewportHeight * 0.45) &&
+        rect.left <= Math.max(96, viewportWidth * 0.12) &&
+        rect.top <= Math.max(96, viewportHeight * 0.18)
+      );
+    };
+
+    const hasBottomControl = (sidebar) => {
+      const sidebarRect = sidebar.getBoundingClientRect();
+      const controls = Array.from(sidebar.querySelectorAll('button, a, [role="button"]'));
+      return controls.some((control) => {
+        if (!(control instanceof HTMLElement) || !isVisibleElement(control)) return false;
+        const rect = control.getBoundingClientRect();
+        const text = quickControlText(control);
+        const nearBottom = rect.bottom >= sidebarRect.bottom - 260;
+        const compact = rect.width > 0 && rect.width <= 64 && rect.height > 0 && rect.height <= 64;
+        return nearBottom && (compact || /\bmobile\b|\bphone\b|\bdevice\b|\bsettings?\b|手机|移动|设备|连接|设置/.test(text));
+      });
+    };
+
+    const addSidebarAncestorsForBottomControls = (candidates) => {
+      const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+      const controls = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+      for (const control of controls) {
+        if (!(control instanceof HTMLElement) || !isVisibleElement(control)) continue;
+        const rect = control.getBoundingClientRect();
+        if (rect.left > 560 || rect.bottom < viewportHeight - 280) continue;
+        const text = quickControlText(control);
+        const compact = rect.width > 0 && rect.width <= 64 && rect.height > 0 && rect.height <= 64;
+        if (!compact && !/\bmobile\b|\bphone\b|\bdevice\b|\bsettings?\b|手机|移动|设备|连接|设置/.test(text)) continue;
+        let node = control.parentElement;
+        while (node && node !== document.body) {
+          if (isSidebarGeometry(node) && !looksLikeSettingsSidebar(node)) candidates.add(node);
+          node = node.parentElement;
+        }
+      }
+    };
+
+    const sidebarScore = (sidebar) => {
+      if (!isSidebarGeometry(sidebar) || looksLikeSettingsSidebar(sidebar)) return -Infinity;
+      const rect = sidebar.getBoundingClientRect();
+      let score = 0;
+      if (rect.left <= 16) score += 4;
+      else if (rect.left <= 80) score += 2;
+      if (rect.width >= 220 && rect.width <= 420) score += 3;
+      if (rect.height >= (window.innerHeight || 0) * 0.75) score += 3;
+      if (looksLikeMainAppSidebar(sidebar)) score += 6;
+      if (hasBottomControl(sidebar)) score += 5;
+      if (/^(aside|nav)$/i.test(sidebar.tagName) || sidebar.getAttribute("role") === "navigation") score += 2;
+      return score;
+    };
+
     const findUsageSidebar = () => {
-      const candidates = Array.from(document.querySelectorAll(ASIDE_SELECTOR))
-        .filter((node) => node instanceof HTMLElement && isVisibleElement(node))
-        .filter((sidebar) => {
-          const rect = sidebar.getBoundingClientRect();
-          return rect.width >= 180 && !looksLikeSettingsSidebar(sidebar);
-        });
-      return candidates.find(looksLikeMainAppSidebar) || null;
+      const candidates = new Set(
+        Array.from(document.querySelectorAll(SIDEBAR_CANDIDATE_SELECTOR))
+          .filter((node) => node instanceof HTMLElement),
+      );
+      addSidebarAncestorsForBottomControls(candidates);
+      return Array.from(candidates)
+        .map((sidebar) => ({ sidebar, score: sidebarScore(sidebar) }))
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score || a.sidebar.getBoundingClientRect().left - b.sidebar.getBoundingClientRect().left)[0]?.sidebar || null;
     };
 
     const controlText = (node) =>
@@ -1148,14 +1230,59 @@ const FEATURES = {
         .trim()
         .toLowerCase();
 
+    const controlLabelText = (node) =>
+      [node.getAttribute?.("aria-label"), node.getAttribute?.("title")]
+        .filter(Boolean)
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .toLowerCase();
+
     const isDeviceButton = (button) => {
+      const label = controlLabelText(button);
+      if (/\bmobile\b|\bphone\b|\bdevice\b|手机|移动|设备|连接/.test(label)) return true;
       const text = controlText(button);
-      return /\bmobile\b|\bphone\b|\bdevice\b|手机|移动|设备|连接/.test(text);
+      return text.length <= 28 && /\bmobile\b|\bphone\b|\bdevice\b|手机|移动|设备|连接/.test(text);
     };
 
     const isSettingsButton = (button) => {
       const text = controlText(button);
       return /\bsettings?\b|preferences?|设置|偏好/.test(text);
+    };
+
+    const isNearSidebarBottom = (sidebar, node) => {
+      if (!(sidebar instanceof HTMLElement) || !(node instanceof HTMLElement)) return false;
+      const sidebarRect = sidebar.getBoundingClientRect();
+      const rect = node.getBoundingClientRect();
+      const bottomBand = Math.min(Math.max(sidebarRect.height * 0.22, 120), 240);
+      return rect.bottom >= sidebarRect.bottom - bottomBand;
+    };
+
+    const isCompactIconControl = (control) => {
+      const rect = control.getBoundingClientRect();
+      const text = controlText(control);
+      return rect.width > 0 && rect.width <= 56 && rect.height > 0 && rect.height <= 56 && text.length <= 32;
+    };
+
+    const isUsageControlNode = (node) =>
+      node.closest?.('[data-codexpp="usage-slot"], [data-codexpp="usage-box"], [data-codexpp="usage-boxes"]');
+
+    const rowControls = (row) =>
+      Array.from(row.querySelectorAll('button, a, [role="button"]'))
+        .filter((control) =>
+          control instanceof HTMLElement &&
+          isVisibleElement(control) &&
+          !isUsageControlNode(control),
+        );
+
+    const isSlotAfterRightmostControl = (slot) => {
+      const row = slot.parentElement;
+      if (!(row instanceof HTMLElement)) return false;
+      const controls = rowControls(row);
+      if (!controls.length) return true;
+      const slotRect = slot.getBoundingClientRect();
+      const rightmostControl = Math.max(...controls.map((control) => control.getBoundingClientRect().right));
+      return slotRect.right >= rightmostControl - 2;
     };
 
     const nearestControlRow = (sidebar, button) => {
@@ -1169,15 +1296,17 @@ const FEATURES = {
         const insideSidebar =
           rect.left >= sidebarRect.left - 8 &&
           rect.right <= sidebarRect.right + 8;
+        const nearBottom = isNearSidebarBottom(sidebar, row);
         const looksLikeControlLayer =
           insideSidebar &&
+          nearBottom &&
           rect.height > 0 &&
           rect.height <= 88 &&
           (style.display === "flex" || style.display === "grid" || buttonCount >= 2);
         if (looksLikeControlLayer) return row;
         row = row.parentElement;
       }
-      return button.parentElement instanceof HTMLElement ? button.parentElement : null;
+      return null;
     };
 
     const createInlineSlot = (row, anchor) => {
@@ -1197,18 +1326,45 @@ const FEATURES = {
     const findSidebarSlot = () => {
       const sidebar = findUsageSidebar();
       if (!sidebar) return null;
-      const existingSlot = sidebar.querySelector('[data-codexpp="usage-slot"]');
+      for (const slot of sidebar.querySelectorAll('[data-codexpp="usage-slot"]')) {
+        const row = slot.parentElement;
+        if (
+          !(slot instanceof HTMLElement) ||
+          !(row instanceof HTMLElement) ||
+          !isNearSidebarBottom(sidebar, row) ||
+          !isSlotAfterRightmostControl(slot)
+        ) {
+          slot.remove();
+        }
+      }
+      const existingSlot = Array.from(sidebar.querySelectorAll('[data-codexpp="usage-slot"]'))
+        .find((slot) =>
+          slot instanceof HTMLElement &&
+          slot.parentElement instanceof HTMLElement &&
+          isNearSidebarBottom(sidebar, slot.parentElement) &&
+          isSlotAfterRightmostControl(slot),
+        );
       if (existingSlot instanceof HTMLElement) return existingSlot;
 
       const controls = Array.from(sidebar.querySelectorAll('button, a, [role="button"]'))
-        .filter((button) => button instanceof HTMLElement && isVisibleElement(button));
+        .filter((button) =>
+          button instanceof HTMLElement &&
+          isVisibleElement(button) &&
+          isNearSidebarBottom(sidebar, button) &&
+          !isUsageControlNode(button),
+        );
       const deviceControls = controls.filter(isDeviceButton);
       const settingsControls = controls.filter(isSettingsButton);
-      const preferredControls = deviceControls.length ? deviceControls : settingsControls;
+      const compactControls = controls.filter(isCompactIconControl);
+      const preferredControls = deviceControls.length
+        ? deviceControls
+        : compactControls.length
+          ? compactControls
+          : settingsControls;
       const ordered = (preferredControls.length ? preferredControls : controls).sort((a, b) => {
         const ar = a.getBoundingClientRect();
         const br = b.getBoundingClientRect();
-        return br.bottom - ar.bottom;
+        return br.right - ar.right || br.bottom - ar.bottom;
       });
 
       for (const button of ordered) {
