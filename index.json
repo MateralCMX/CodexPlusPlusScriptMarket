@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-07-16T08:26:58Z",
+  "updated_at": "2026-07-16T08:26:59Z",
   "scripts": [
     {
       "id": "codex-context-used-meter",
@@ -222,6 +222,22 @@
       "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/prompt-optimize.js",
       "sha256": "1993a9d5e3717b0d62edd9d1d9933ef2a1d0bd04cc122781032b8c7fc57a49b7"
+    },
+    {
+      "id": "codex-native-matrix-selector",
+      "name": "Codex Native Matrix Selector",
+      "description": "A theme-aware model and reasoning matrix backed by Codex's native selector data and handlers.",
+      "version": "0.8.0",
+      "author": "Codex",
+      "tags": [
+        "codex",
+        "models",
+        "reasoning",
+        "ui"
+      ],
+      "homepage": "",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/Codex%20Model%20Matrix.js",
+      "sha256": "0a25838a887699f8c8b72efc67f64d9df045697f6e1555b856fb10a9baa8f075"
     }
   ]
 }
