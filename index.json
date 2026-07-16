@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-07-16T08:27:03Z",
+  "updated_at": "2026-07-16T08:27:05Z",
   "scripts": [
     {
       "id": "codex-context-used-meter",
@@ -124,7 +124,7 @@
       "id": "tux-toolbar-buddy",
       "name": "Tux Toolbar Buddy",
       "description": "把菜单入口轻量化为Tux工具栏按钮，隐藏状态点和版本信息。",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": "0xTotoroX",
       "tags": [
         "menu",
@@ -134,7 +134,7 @@
       ],
       "homepage": "https://github.com/0xTotoroX/tux-toolbar-buddy",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/tux-toolbar-buddy.js",
-      "sha256": "8f353ca2bb4e47e10be8ad70497330b0e7c25fd77aa69c2f40ad81b7cf449db1"
+      "sha256": "6570fba293c751958b6cf7077b51458e1b126cf99c9168c321729316a7f0262b"
     },
     {
       "id": "bennett-ui-improvements",
