@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-07-16T08:26:53Z",
+  "updated_at": "2026-07-16T08:26:55Z",
   "scripts": [
     {
       "id": "codex-context-used-meter",
@@ -169,6 +169,24 @@
       "homepage": "https://github.com/BigPizzaV3/CodexPlusPlus",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-provider-guard.js",
       "sha256": "a047592791a2836fd1d665c7b0a8ca8f64a8924ee4b2a08f09e3c52b12dec5b1"
+    },
+    {
+      "id": "codex-bundled-plugin-doctor",
+      "name": "Codex Bundled Plugin Doctor",
+      "description": "诊断并修复 Codex Desktop 的 bundled 插件异常，如 Chrome / Computer Use 消失、marketplace.json 缺失、设置页 unavailable。",
+      "version": "0.1.0",
+      "author": "BigPizzaV3",
+      "tags": [
+        "codex",
+        "plugins",
+        "repair",
+        "windows",
+        "diagnostic",
+        "doctor"
+      ],
+      "homepage": "https://github.com/BigPizzaV3/CodexPlusPlusScriptMarket",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-bundled-plugin-doctor.js",
+      "sha256": "4c2eac259c62d007ec84ed925886ac79a2f5c520acb67c42f419e707934563ff"
     }
   ]
 }
