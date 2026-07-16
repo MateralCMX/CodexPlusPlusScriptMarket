@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-07-14T07:37:22.000Z",
+  "updated_at": "2026-07-16T08:26:53Z",
   "scripts": [
     {
       "id": "codex-context-used-meter",
@@ -152,6 +152,23 @@
       "homepage": "",
       "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/bennett-ui-improvements.js",
       "sha256": "2fb8c36ab5a7103d103deb53a55c5f42ab26763479bec253dccbb825c93e1af9"
+    },
+    {
+      "id": "codex-provider-guard",
+      "name": "Codex Provider Guard",
+      "description": "只读检查供应商 ID、会话分桶和本地端口风险；修复必须在 Codex++ 原生管理器中确认执行。",
+      "version": "1.0.2",
+      "author": "k9ight000",
+      "tags": [
+        "codex",
+        "provider",
+        "sessions",
+        "safety",
+        "cpa"
+      ],
+      "homepage": "https://github.com/BigPizzaV3/CodexPlusPlus",
+      "script_url": "https://raw.githubusercontent.com/BigPizzaV3/CodexPlusPlusScriptMarket/main/scripts/codex-provider-guard.js",
+      "sha256": "a047592791a2836fd1d665c7b0a8ca8f64a8924ee4b2a08f09e3c52b12dec5b1"
     }
   ]
 }
