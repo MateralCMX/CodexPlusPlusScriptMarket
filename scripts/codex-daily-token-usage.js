@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.4.13
+// @version      1.4.14
 // @description  每日 Token 统计，近 5 日滚动存储，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.13";
+  const VERSION = "1.4.14";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
@@ -2631,6 +2631,7 @@
       #${PANEL_ID} {
         position: fixed;
         width: min(350px, calc(100vw - 24px));
+        max-height: calc(100dvh - 24px);
         box-sizing: border-box;
         padding: 14px;
         border: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.24));
@@ -2644,6 +2645,10 @@
         transition: opacity 120ms ease, visibility 120ms ease, transform 120ms ease;
         pointer-events: none;
         cursor: default;
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        scrollbar-width: thin;
         z-index: 2147483647;
         font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         -webkit-app-region: no-drag;
@@ -2654,23 +2659,46 @@
         transform: translateY(0);
         pointer-events: auto;
       }
+      #${PANEL_ID}::-webkit-scrollbar {
+        width: 8px;
+      }
+      #${PANEL_ID}::-webkit-scrollbar-thumb {
+        border: 2px solid transparent;
+        border-radius: 999px;
+        background: rgba(127, 127, 127, 0.48);
+        background-clip: padding-box;
+      }
       #${PANEL_ID} .codex-daily-heading {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 12px;
-        margin-bottom: 12px;
+        position: sticky;
+        top: -14px;
+        z-index: 2;
+        margin: -14px -14px 12px;
+        padding: 14px 14px 12px;
+        border-bottom: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.18));
+        background: var(--color-token-background, #ffffff);
+        flex-wrap: nowrap;
       }
       #${PANEL_ID} .codex-daily-title {
+        flex: 0 0 auto;
         font-size: 13px;
         font-weight: 650;
+        white-space: nowrap;
       }
       #${PANEL_ID} .codex-daily-head-actions {
         display: inline-flex;
+        min-width: 0;
+        flex: 1 1 auto;
         align-items: center;
+        justify-content: flex-end;
         gap: 6px;
+        white-space: nowrap;
       }
       #${PANEL_ID} .codex-daily-price-toggle {
+        flex: 0 0 auto;
         height: 29px;
         display: inline-flex;
         align-items: center;
@@ -2683,6 +2711,7 @@
         font: inherit;
         font-size: 11px;
         font-weight: 600;
+        white-space: nowrap;
       }
       #${PANEL_ID} .codex-daily-price-toggle:hover,
       #${PANEL_ID} .codex-daily-price-toggle[aria-expanded="true"] {
@@ -2691,6 +2720,7 @@
         background: rgba(74, 144, 226, 0.11);
       }
       #${PANEL_ID} .codex-daily-date-nav {
+        flex: 0 0 auto;
         display: inline-flex;
         align-items: center;
         gap: 3px;
@@ -2736,6 +2766,27 @@
         font-size: 11px;
         line-height: 23px;
         color-scheme: light dark;
+      }
+      @media (max-width: 420px) {
+        #${PANEL_ID} .codex-daily-heading {
+          gap: 7px;
+        }
+        #${PANEL_ID} .codex-daily-head-actions {
+          gap: 4px;
+        }
+        #${PANEL_ID} .codex-daily-price-toggle {
+          padding: 0 6px;
+        }
+        #${PANEL_ID} .codex-daily-date-nav {
+          gap: 1px;
+          padding: 2px 1px;
+        }
+        #${PANEL_ID} .codex-daily-date-button {
+          width: 21px;
+        }
+        #${PANEL_ID} .codex-daily-date-input {
+          width: 88px;
+        }
       }
       #${PANEL_ID} .codex-daily-summary {
         display: flex;
@@ -3089,9 +3140,6 @@
       #${PANEL_ID} .codex-daily-price-list {
         display: grid;
         gap: 9px;
-        max-height: 260px;
-        overflow: auto;
-        padding-right: 2px;
       }
       #${PANEL_ID} .codex-daily-price-row {
         display: grid;
@@ -3143,7 +3191,13 @@
         align-items: center;
         justify-content: space-between;
         gap: 10px;
-        margin-top: 11px;
+        position: sticky;
+        bottom: -14px;
+        z-index: 2;
+        margin: 11px -14px -14px;
+        padding: 10px 14px 14px;
+        border-top: 1px solid var(--color-token-border, rgba(127, 127, 127, 0.18));
+        background: var(--color-token-background, #ffffff);
         color: var(--color-token-foreground-secondary, #737373);
         font-size: 11px;
         line-height: 1.45;
@@ -3217,6 +3271,22 @@
         #${PANEL_ID} {
           background: var(--color-token-background, #202020);
           color: var(--color-token-foreground, #f2f2f2);
+        }
+        #${PANEL_ID} .codex-daily-heading,
+        #${PANEL_ID} .codex-daily-foot {
+          background: var(--color-token-background, #202020);
+        }
+        #${PANEL_ID} .codex-daily-price-model-input,
+        #${PANEL_ID} .codex-daily-price-input {
+          color: #f2f2f2;
+          caret-color: #f2f2f2;
+          border-color: rgba(255, 255, 255, 0.18);
+          background: rgba(255, 255, 255, 0.1);
+        }
+        #${PANEL_ID} .codex-daily-price-model-input::placeholder,
+        #${PANEL_ID} .codex-daily-price-input::placeholder {
+          color: rgba(242, 242, 242, 0.48);
+          opacity: 1;
         }
       }
     `;
@@ -3558,6 +3628,14 @@
         `;
         return row;
       })
+    );
+  }
+
+  function isEditingPriceSettings() {
+    const active = document.activeElement;
+    return Boolean(
+      active?.classList?.contains("codex-daily-price-model-input") ||
+        active?.classList?.contains("codex-daily-price-input")
     );
   }
 
@@ -4190,7 +4268,7 @@
     renderPanelTrend(buildTrendData(selectedDateKey));
     renderModelBreakdown(snapshot);
     renderToolCalls(snapshot);
-    if (panel.querySelector(".codex-daily-price-panel")?.hidden === false) {
+    if (panel.querySelector(".codex-daily-price-panel")?.hidden === false && !isEditingPriceSettings()) {
       renderPriceSettings(snapshot);
     }
 
