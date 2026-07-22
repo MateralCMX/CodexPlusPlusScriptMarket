@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Codex Daily Token Usage
 // @namespace    codex-plus-plus
-// @version      1.4.14
+// @version      1.4.15
 // @description  每日 Token 统计，近 5 日滚动存储，优先复用已有采集，必要时内置采集，支持 Model 价格、成本估算、日期切换、5 日趋势与分享图。
 // @match        app://-/*
 // @run-at       document-start
@@ -10,7 +10,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.4.14";
+  const VERSION = "1.4.15";
   const API_KEY = "__codexDailyTokenUsage";
   const SOURCE_API_KEY = "__codexTokenUsage";
   const STORAGE_KEY = "__codexDailyTokenUsageV1";
@@ -149,9 +149,12 @@
   let captureSeq = 0;
   let externalEmptyCount = 0;
   let lastRenderedTotal = -1;
+  let lastRenderSignature = "";
   let lastDateKey = getDateKey(Date.now());
   let selectedDateKey = lastDateKey;
   let state = loadState();
+  const dayVersions = new Map();
+  const daySnapshotCache = new Map();
   if (pruneState()) saveState();
   let priceConfig = loadPriceConfig();
   let lastObservedModel = "";
@@ -808,10 +811,25 @@
       const timestamp = Date.parse(`${key}T00:00:00`);
       if (!Number.isFinite(timestamp) || timestamp < cutoff.getTime()) {
         delete state.days[key];
+        invalidateDay(key);
         changed = true;
       }
     }
     return changed;
+  }
+
+  function invalidateDay(dateKey) {
+    const normalized = String(dateKey || "");
+    if (!normalized) return 0;
+    const version = (dayVersions.get(normalized) || 0) + 1;
+    dayVersions.set(normalized, version);
+    daySnapshotCache.delete(normalized);
+    return version;
+  }
+
+  function clearDaySnapshotCache() {
+    dayVersions.clear();
+    daySnapshotCache.clear();
   }
 
   function upsertTurn(turn) {
@@ -858,6 +876,7 @@
           updatedAt: Math.max(existing.updatedAt || 0, candidate.updatedAt),
         };
         state.days[dateKey] = day;
+        invalidateDay(dateKey);
         return true;
       }
       return false;
@@ -899,6 +918,7 @@
     }
 
     state.days[dateKey] = day;
+    invalidateDay(dateKey);
     return true;
   }
 
@@ -925,6 +945,7 @@
       if (!day.toolEvents[persistedEventKey]) {
         day.toolEvents[persistedEventKey] = compactToolEvent(event, now);
         state.days[dateKey] = day;
+        invalidateDay(dateKey);
         return true;
       }
       return false;
@@ -970,6 +991,7 @@
     }
 
     state.days[dateKey] = day;
+    invalidateDay(dateKey);
     return true;
   }
 
@@ -1040,12 +1062,94 @@
     return best?.id || "";
   }
 
+  function buildTurnIndexes(turnEntries) {
+    const byIdentityKey = new Map();
+    const byConversationKey = new Map();
+    const allByTimestamp = [];
+    const unscopedByTimestamp = [];
+
+    for (const [id, turn] of turnEntries) {
+      const entry = { id, turn, timestamp: toCount(turn?.updatedAt) };
+      for (const key of turnIdentityKeys(id, turn)) {
+        if (!byIdentityKey.has(key)) byIdentityKey.set(key, id);
+      }
+      const conversationKeys = turnConversationKeys(turn);
+      if (conversationKeys.length) {
+        for (const key of conversationKeys) {
+          if (!byConversationKey.has(key)) byConversationKey.set(key, []);
+          byConversationKey.get(key).push(entry);
+        }
+      } else {
+        unscopedByTimestamp.push(entry);
+      }
+      allByTimestamp.push(entry);
+    }
+
+    const byTimestamp = (left, right) => left.timestamp - right.timestamp;
+    allByTimestamp.sort(byTimestamp);
+    unscopedByTimestamp.sort(byTimestamp);
+    for (const entries of byConversationKey.values()) entries.sort(byTimestamp);
+    return { byIdentityKey, byConversationKey, allByTimestamp, unscopedByTimestamp };
+  }
+
+  function firstTimestampIndex(entries, timestamp) {
+    let low = 0;
+    let high = entries.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (entries[middle].timestamp < timestamp) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+
+  function nearestIndexedTurnId(event, indexes) {
+    const timestamp = toolEventUsageTimestamp(event);
+    if (!timestamp) return "";
+    const eventKeys = conversationKeyVariants(event?.conversationKey);
+    const lists = eventKeys.length
+      ? [...new Set(eventKeys.map((key) => indexes.byConversationKey.get(key)).filter(Boolean)), indexes.unscopedByTimestamp]
+      : [indexes.allByTimestamp];
+    let best = null;
+
+    for (const entries of lists) {
+      const start = firstTimestampIndex(entries, timestamp);
+      for (const direction of [-1, 1]) {
+        for (let index = direction < 0 ? start - 1 : start; index >= 0 && index < entries.length; index += direction) {
+          const entry = entries[index];
+          const distance = Math.abs(entry.timestamp - timestamp);
+          if (distance > TOOL_USAGE_MATCH_WINDOW_MS) break;
+          if (!eventConversationMatchesTurn(event, entry.turn)) continue;
+          const score = distance + (entry.timestamp >= timestamp ? 0 : TOOL_USAGE_MATCH_WINDOW_MS / 2);
+          if (!best || score < best.score) best = { id: entry.id, score };
+        }
+      }
+    }
+    return best?.id || "";
+  }
+
+  function linkToolEventsIndexed(turnEntries, toolEvents) {
+    const indexes = buildTurnIndexes(turnEntries);
+    const matchedTurnIds = new Set();
+    let estimated = false;
+    for (const event of toolEvents) {
+      const exactId = conversationKeyVariants(event?.turnKey)
+        .map((key) => indexes.byIdentityKey.get(key))
+        .find(Boolean);
+      const matchedId = exactId || nearestIndexedTurnId(event, indexes);
+      if (!matchedId) continue;
+      matchedTurnIds.add(matchedId);
+      if (!exactId) estimated = true;
+    }
+    return { matchedTurnIds, estimated };
+  }
+
   function calculateTurnCost(turn) {
     const costInfo = calculateUsageCost(turn, getModelPrice(displayModelName(turn?.model)));
     return costInfo.configured ? costInfo.cost : 0;
   }
 
-  function aggregateDay(dateKey = getDateKey(Date.now())) {
+  function buildDaySnapshot(dateKey = getDateKey(Date.now())) {
     const day = state.days[dateKey] || {};
     const turnEntries = Object.entries(day.turns || {});
     const turns = turnEntries.map(([, turn]) => turn);
@@ -1141,7 +1245,9 @@
       .filter(Boolean);
     const toolTurnsByKey = new Map();
     const toolTurnKeys = new Set();
-    const matchedTurnIds = new Set();
+    const linkedToolTurns = linkToolEventsIndexed(turnEntries, toolEvents);
+    const matchedTurnIds = linkedToolTurns.matchedTurnIds;
+    summary.toolLinkedEstimated = linkedToolTurns.estimated;
     for (const event of toolEvents) {
       const key = toolCallKey(event.kind, event.namespace, event.name);
       const turnKey = normalizeConversationKey(event.turnKey);
@@ -1151,12 +1257,6 @@
         toolTurnsByKey.get(key).add(turnKey);
       }
 
-      const exactTurnId = findExactToolTurnId(event, turnEntries);
-      const matchedTurnId = exactTurnId || findNearestToolTurnId(event, turnEntries);
-      if (matchedTurnId) {
-        matchedTurnIds.add(matchedTurnId);
-        if (!exactTurnId) summary.toolLinkedEstimated = true;
-      }
     }
 
     for (const toolCall of Object.values(day.toolCalls || {})) {
@@ -1208,6 +1308,32 @@
     delete summary.modelsByName;
     delete summary.toolCallsByKey;
     return summary;
+  }
+
+  function aggregateDayCached(dateKey = getDateKey(Date.now())) {
+    const normalized = String(dateKey || getDateKey(Date.now()));
+    const version = dayVersions.get(normalized) || 0;
+    const cached = daySnapshotCache.get(normalized);
+    if (cached?.version === version) {
+      return { snapshot: cached.snapshot, cacheHit: true, version };
+    }
+    const snapshot = buildDaySnapshot(normalized);
+    daySnapshotCache.set(normalized, { version, snapshot });
+    return { snapshot, cacheHit: false, version };
+  }
+
+  function aggregateDay(dateKey = getDateKey(Date.now())) {
+    return aggregateDayCached(dateKey).snapshot;
+  }
+
+  function renderStateSignature(todayKey = getDateKey(Date.now()), dateKey = selectedDateKey) {
+    const selectedKey = clampDateKey(dateKey);
+    const trendVersions = [];
+    for (let offset = 0; offset < TREND_DAYS; offset += 1) {
+      const trendDateKey = shiftDateKey(selectedKey, -offset);
+      trendVersions.push(`${trendDateKey}:${dayVersions.get(trendDateKey) || 0}`);
+    }
+    return `${sourceMode}|${todayKey}:${dayVersions.get(todayKey) || 0}|${selectedKey}:${dayVersions.get(selectedKey) || 0}|${trendVersions.join(",")}`;
   }
 
   function formatTrendDateLabel(dateKey) {
@@ -4278,6 +4404,7 @@
       root.classList.add("is-updated");
       window.setTimeout(() => root?.classList.remove("is-updated"), 450);
     }
+    lastRenderSignature = renderStateSignature(todayKey, selectedDateKey);
   }
 
   function scheduleMidnightRefresh() {
@@ -4310,13 +4437,18 @@
     const sourceChanged = syncFromSource();
     const domToolChanged = processDomToolCalls();
     const changed = sourceChanged || domToolChanged;
-    mountRoot();
-    render({ animate: changed });
+    const signature = renderStateSignature(currentDateKey, selectedDateKey);
+    if (signature !== lastRenderSignature) {
+      mountRoot();
+      render({ animate: changed });
+    }
     return aggregateDay();
   }
 
   function resetToday() {
-    delete state.days[getDateKey(Date.now())];
+    const dateKey = getDateKey(Date.now());
+    delete state.days[dateKey];
+    invalidateDay(dateKey);
     saveState();
     render();
     return aggregateDay();
@@ -4392,6 +4524,10 @@
       isUsageTurn,
       upsertTurn,
       aggregateDay,
+      aggregateDayCached,
+      linkToolEventsIndexed,
+      renderStateSignature,
+      recordTurnForTest: (turn) => upsertTurn(turn),
       formatCompact,
       buildTrendData,
       trendPoints,
@@ -4413,6 +4549,7 @@
       },
       replaceState(nextState) {
         state = nextState;
+        clearDaySnapshotCache();
       },
     },
   };
